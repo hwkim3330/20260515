@@ -357,16 +357,22 @@ public class LabWorkerService : IDisposable
             foreach (var ua in nic.GetIPProperties().UnicastAddresses)
             {
                 if (ua.Address.AddressFamily == AddressFamily.InterNetwork)
-                    addrs.Add(ua.Address.ToString());
+                    addrs.Add(new JsonObject
+                    {
+                        ["local"]     = ua.Address.ToString(),
+                        ["prefixlen"] = ua.PrefixLength
+                    });
             }
 
             list.Add(new JsonObject
             {
                 ["name"]  = nic.Name,
+                ["key"]   = nic.Name,
                 ["mac"]   = macStr,
                 ["state"] = nic.OperationalStatus == OperationalStatus.Up ? "up" : "down",
                 ["mtu"]   = nic.GetIPProperties().GetIPv4Properties()?.Mtu ?? 0,
-                ["ipv4"]  = addrs
+                ["ipv4"]  = addrs,
+                ["description"] = nic.Description
             });
         }
 
