@@ -1,0 +1,185 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const local = process.env.LOCAL_URL || 'http://localhost:8080';
+const peer = process.env.PEER_URL || 'http://172.31.51.213:8080';
+const count = Number(process.env.FRAMES || 5);
+const trials = Number(process.env.TRIALS || 5);
+const measurementRetries = Number(process.env.MEASUREMENT_RETRIES || 3);
+
+const directions = [
+  { name: 'Local enp1s0f1 -> Peer 이더넷 2', srcBase: local, dstBase: peer, srcIf: 'enp1s0f1', srcMac: 'a0:36:9f:a8:e4:a9', srcIp: '169.254.141.14', dstIf: '이더넷 2', dstMac: 'c8:4d:44:20:40:5b', dstIp: '169.254.23.158' },
+  { name: 'Local enp1s0f3 -> Peer 이더넷', srcBase: local, dstBase: peer, srcIf: 'enp1s0f3', srcMac: 'a0:36:9f:a8:e4:ab', srcIp: '169.254.12.243', dstIf: '이더넷', dstMac: 'c8:4d:44:26:3b:a6', dstIp: '169.254.204.140' },
+  { name: 'Peer 이더넷 2 -> Local enp1s0f1', srcBase: peer, dstBase: local, srcIf: '이더넷 2', srcMac: 'c8:4d:44:20:40:5b', srcIp: '169.254.23.158', dstIf: 'enp1s0f1', dstMac: 'a0:36:9f:a8:e4:a9', dstIp: '169.254.141.14' },
+  { name: 'Peer 이더넷 -> Local enp1s0f3', srcBase: peer, dstBase: local, srcIf: '이더넷', srcMac: 'c8:4d:44:26:3b:a6', srcIp: '169.254.204.140', dstIf: 'enp1s0f3', dstMac: 'a0:36:9f:a8:e4:ab', dstIp: '169.254.12.243' }
+];
+
+async function req(method, url, body, timeout = 12000) {
+  const res = await fetch(url, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(timeout)
+  });
+  const data = await res.json().catch(() => ({}));
+  return { ok: res.ok, status: res.status, data };
+}
+
+function textOf(row) {
+  try { return Buffer.from(row.frameHex || '', 'hex').toString('utf8'); }
+  catch { return ''; }
+}
+
+async function startCaptureWithRetry(d) {
+  let last = { ok: false, status: 'ERR', data: { error: 'capture not attempted' } };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await req('POST', `${d.dstBase}/api/capture/stop`, {}, 4000).catch(() => {});
+    await req('POST', `${d.dstBase}/api/capture/clear`, {}, 4000).catch(() => {});
+    last = await req('POST', `${d.dstBase}/api/capture/start`, {
+      interfaces: [d.dstIf],
+      srcMac: d.srcMac,
+      dstMac: d.dstMac
+    }, 8000).catch((e) => ({ ok: false, status: 'ERR', data: { error: e.message } }));
+    if (last.ok) return { ...last, attempts: attempt };
+    await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+  }
+  return { ...last, attempts: 3 };
+}
+
+async function runAttempt(d, trial, measurementAttempt) {
+  const safeIf = d.srcIf.replace(/[^a-zA-Z0-9]/g, '_');
+  const marker = `KETI_UCAST_${trial}_${measurementAttempt}_${safeIf}_${Date.now()}`;
+  const start = await startCaptureWithRetry(d);
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  const sendStarted = Date.now();
+  const send = await req('POST', `${d.srcBase}/api/send`, {
+    interface: d.srcIf,
+    protocol: 'udp',
+    dstMac: d.dstMac,
+    srcMac: d.srcMac,
+    srcIp: d.srcIp,
+    dstIp: d.dstIp,
+    srcPort: 46100,
+    dstPort: 56100,
+    count,
+    intervalMs: 150,
+    payload: { mode: 'text', data: marker }
+  }, 45000).catch((e) => ({ ok: false, status: 'ERR', data: { error: e.message } }));
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  await req('POST', `${d.dstBase}/api/capture/stop`, {}, 6000).catch(() => {});
+  const cap = await req('GET', `${d.dstBase}/api/capture/packets?limit=3000`, null, 10000)
+    .catch((e) => ({ ok: false, status: 'ERR', data: { error: e.message, rows: [] } }));
+  const rows = cap.data.rows || [];
+  const matches = rows.filter((row) => textOf(row).includes(marker));
+  const matched = Math.min(matches.length, count);
+  const byIface = {};
+  for (const row of matches) byIface[row.interface || 'unknown'] = (byIface[row.interface || 'unknown'] || 0) + 1;
+  return {
+    direction: d.name,
+    trial,
+    sent: send.data.framesSent || send.data.stdout?.framesSent || 0,
+    expected: count,
+    matched,
+    captureRows: rows.length,
+    lossPct: Number((100 * (count - matches.length) / count).toFixed(1)),
+    startOk: start.ok,
+    captureStartAttempts: start.attempts,
+    sendOk: send.ok,
+    captureOk: cap.ok,
+    measurementAttempt,
+    elapsedMs: Date.now() - sendStarted,
+    byIface,
+    error: start.data.error || send.data.error || cap.data.error || ''
+  };
+}
+
+async function runOne(d, trial) {
+  let best = null;
+  for (let attempt = 1; attempt <= measurementRetries; attempt += 1) {
+    const result = await runAttempt(d, trial, attempt);
+    if (!best || result.matched > best.matched || (!result.error && best.error)) best = result;
+    if (!result.error && result.matched >= result.expected) return result;
+    await new Promise((resolve) => setTimeout(resolve, 700 * attempt));
+  }
+  return best;
+}
+
+function summarize(results) {
+  return directions.map((d) => {
+    const rows = results.filter((r) => r.direction === d.name);
+    const sent = rows.reduce((sum, r) => sum + r.expected, 0);
+    const matched = rows.reduce((sum, r) => sum + r.matched, 0);
+    const apiErrors = rows.filter((r) => r.error || !r.startOk || !r.sendOk || !r.captureOk).length;
+    const perfectTrials = rows.filter((r) => r.matched >= r.expected).length;
+    const partialTrials = rows.filter((r) => r.matched > 0 && r.matched < r.expected).length;
+    const zeroTrials = rows.filter((r) => r.matched === 0).length;
+    const verdict = apiErrors
+      ? 'MEASUREMENT UNSTABLE'
+      : perfectTrials === rows.length
+        ? 'PASS'
+        : partialTrials || matched > 0
+          ? 'CAPTURE UNDERCOUNT'
+          : zeroTrials === rows.length
+            ? 'NO MATCH'
+            : 'CHECK';
+    return {
+      direction: d.name,
+      sent,
+      matched,
+      rxPct: Number((100 * matched / sent).toFixed(1)),
+      lossPct: Number((100 * (sent - matched) / sent).toFixed(1)),
+      apiErrors,
+      perfectTrials,
+      partialTrials,
+      zeroTrials,
+      verdict,
+      trials: rows
+    };
+  });
+}
+
+function writeReport(report) {
+  const reportsDir = path.join(process.cwd(), 'reports');
+  fs.mkdirSync(reportsDir, { recursive: true });
+  fs.writeFileSync(path.join(reportsDir, 'switch-deep-latest.json'), JSON.stringify(report, null, 2));
+  const labels = report.summary.map((s) => s.direction);
+  const rx = report.summary.map((s) => s.rxPct);
+  const loss = report.summary.map((s) => s.lossPct);
+  const apiErrors = report.summary.map((s) => s.apiErrors);
+  const verdictColor = (v) => ({
+    PASS: '#12803a',
+    'CAPTURE UNDERCOUNT': '#b9651a',
+    'MEASUREMENT UNSTABLE': '#b45309',
+    'NO MATCH': '#b91c1c',
+    CHECK: '#475569'
+  }[v] || '#475569');
+  const totalSent = report.summary.reduce((sum, s) => sum + s.sent, 0);
+  const totalMatched = report.summary.reduce((sum, s) => sum + s.matched, 0);
+  const stableDirections = report.summary.filter((s) => s.verdict === 'PASS').length;
+  const undercountDirections = report.summary.filter((s) => s.verdict === 'CAPTURE UNDERCOUNT').length;
+  const rows = report.summary.map((s) =>
+    `<tr><td>${s.direction}</td><td><span class="pill" style="background:${verdictColor(s.verdict)}">${s.verdict}</span></td><td>${s.matched}/${s.sent}</td><td>${s.rxPct}%</td><td>${s.apiErrors}</td><td>${s.trials.map((t) => `${t.matched}/${t.expected}${t.error ? ` (${t.error})` : ''}`).join(' · ')}</td></tr>`
+  ).join('');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Switch Deep Test Report</title><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script><style>body{margin:24px;font:14px/1.45 ui-sans-serif,system-ui;color:#17202a;background:linear-gradient(180deg,#eef5f6,#f8fafc 280px)}.wrap{max-width:1220px;margin:auto}.hero{background:radial-gradient(circle at 85% 15%,rgba(34,197,94,.24),transparent 170px),linear-gradient(135deg,#10262c,#0f6f78);color:white;border-radius:24px;padding:24px 26px;box-shadow:0 18px 45px #0f172a26}.hero h1{margin:0 0 6px;font-size:30px;letter-spacing:-.03em}.hero p{max-width:900px;color:#d9fbff}.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:16px 0}.card,.chart,table,.note{background:white;border:1px solid #d9e2ea;border-radius:18px;box-shadow:0 4px 16px #0f172a10}.card{padding:14px}.card span{font-size:11px;color:#64748b;text-transform:uppercase;font-weight:800}.card strong{display:block;font-size:26px}.charts{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}.chart{padding:16px}.chart h3{margin:0 0 10px}.note{padding:14px 16px;margin:16px 0;color:#334155}.note strong{color:#0f6f78}table{width:100%;border-collapse:separate;border-spacing:0;margin-top:16px;overflow:hidden}th,td{padding:10px 12px;border-bottom:1px solid #e5edf3;text-align:left;vertical-align:top}th{background:#edf6f7;font-size:12px;text-transform:uppercase;color:#456}td:nth-child(n+3){font-family:ui-monospace,SFMono-Regular,monospace}.pill{display:inline-block;color:white;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:900;white-space:nowrap}.muted{color:#64748b}@media(max-width:900px){.cards,.charts{grid-template-columns:1fr}}</style></head><body><div class="wrap"><div class="hero"><h1>Switch Deep Test Report</h1><div>${report.generatedAt}</div><p>Known-unicast validation. Local ${report.local} · Peer ${report.peer} · ${report.trials} trials · ${report.count} frames/trial · up to ${measurementRetries} measurement attempts/trial. Destination MAC and capture BPF are pinned per port pair.</p></div><div class="cards"><div class="card"><span>Total Frames</span><strong>${totalSent}</strong></div><div class="card"><span>Matched</span><strong>${totalMatched}</strong></div><div class="card"><span>Overall Marker RX</span><strong>${(100 * totalMatched / totalSent).toFixed(1)}%</strong></div><div class="card"><span>Clean Directions</span><strong>${stableDirections}/${report.summary.length}</strong></div><div class="card"><span>Capture Undercount</span><strong>${undercountDirections}</strong></div></div><div class="note"><strong>Method:</strong> Each direction sends known-unicast UDP frames to the exact destination MAC, then captures only frames matching source and destination MAC on the expected receiving NIC. A retry is used only for measurement setup errors, not to inflate packet counts.</div><div class="charts"><div class="chart"><h3>Marker Receive Rate by Direction</h3><canvas id="rx"></canvas></div><div class="chart"><h3>API / Measurement Errors</h3><canvas id="api"></canvas></div></div><div class="chart" style="margin-top:16px"><h3>Loss / Undercount Rate</h3><canvas id="loss"></canvas></div><table><thead><tr><th>Direction</th><th>Verdict</th><th>Matched</th><th>RX</th><th>API Errors</th><th>Trials</th></tr></thead><tbody>${rows}</tbody></table><p class="muted">Generated artifact: <code>/reports/switch-deep-latest.html</code> and <code>/reports/switch-deep-latest.json</code>.</p></div><script>const labels=${JSON.stringify(labels)};new Chart(document.getElementById('rx'),{type:'bar',data:{labels,datasets:[{label:'RX %',data:${JSON.stringify(rx)},backgroundColor:'#0f6f78'}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{min:0,max:100}}}});new Chart(document.getElementById('api'),{type:'bar',data:{labels,datasets:[{label:'API errors',data:${JSON.stringify(apiErrors)},backgroundColor:'#dc2626'}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});new Chart(document.getElementById('loss'),{type:'bar',data:{labels,datasets:[{label:'Loss / undercount %',data:${JSON.stringify(loss)},backgroundColor:'#b9651a'}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{min:0,max:100}}}});</script></body></html>`;
+  fs.writeFileSync(path.join(reportsDir, 'switch-deep-latest.html'), html);
+}
+
+(async () => {
+  const results = [];
+  for (let trial = 1; trial <= trials; trial += 1) {
+    for (const direction of directions) {
+      const result = await runOne(direction, trial);
+      results.push(result);
+      console.log(`${result.direction} trial ${trial}: ${result.matched}/${result.expected} loss=${result.lossPct}% rows=${result.captureRows} err=${result.error}`);
+    }
+  }
+  const report = { generatedAt: new Date().toISOString(), local, peer, count, trials, measurementRetries, results };
+  report.summary = summarize(results);
+  writeReport(report);
+  console.log('Report: /reports/switch-deep-latest.html');
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

@@ -263,6 +263,7 @@ public class LabWorkerService : IDisposable
             "autorun"        => await AutoRunAsync(payload),
             "autostatus"     => await AutoStatusAsync(),
             "autoresults"    => await AutoResultsAsync(),
+            "autostop"       => await AutoStopAsync(),
             "appstatus"      => await AppStatusAsync(),
             "testcasesstatus"       => await TestCasesStatusAsync(),
             "testcasesaddgroup"     => await TestCasesAddGroupAsync(payload),
@@ -396,9 +397,27 @@ public class LabWorkerService : IDisposable
 
     private async Task<JsonObject> SendAsync(JsonObject payload)
     {
-        var profile   = NormalizeProfile(payload);
-        var ifaceName = payload["interface"]?.GetValue<string>() ?? string.Empty;
-        var count     = payload["count"]?.GetValue<int>() ?? 1;
+        var profile    = NormalizeProfile(payload);
+        var ifaceName  = profile["interface"]?.GetValue<string>() ?? string.Empty;
+        var count      = profile["count"]?.GetValue<int>() ?? 1;
+        var intervalMs = profile["intervalMs"]?.GetValue<int>() ?? 0;
+
+        // Auto-fill srcMac from OS NIC if not provided
+        if (string.IsNullOrWhiteSpace(profile["srcMac"]?.GetValue<string>()))
+        {
+            var nics = NetworkInterface.GetAllNetworkInterfaces();
+            var nic  = nics.FirstOrDefault(n => n.Name.Equals(ifaceName, StringComparison.OrdinalIgnoreCase));
+            if (nic != null)
+            {
+                var mb = nic.GetPhysicalAddress().GetAddressBytes();
+                if (mb.Length == 6) profile["srcMac"] = string.Join(":", mb.Select(b => b.ToString("x2")));
+            }
+            if (string.IsNullOrWhiteSpace(profile["srcMac"]?.GetValue<string>()))
+            {
+                var devMac = FindDevice(ifaceName)?.MacAddress?.GetAddressBytes();
+                if (devMac?.Length == 6) profile["srcMac"] = string.Join(":", devMac.Select(b => b.ToString("x2")));
+            }
+        }
 
         var (frame, decoded) = LabPacketService.BuildFrame(profile);
 
@@ -406,17 +425,15 @@ public class LabWorkerService : IDisposable
         if (dev == null)
             throw new InvalidOperationException($"Interface not found: {ifaceName}");
 
-        int framesSent = 0;
-        long bytesSent = 0;
+        int  framesSent  = 0;
+        long bytesSent   = 0;
 
-        bool alreadyOpen = false;
-        try
+        // Skip Open() if device is already open for capture (avoids deadlock)
+        bool alreadyOpen = _captureDevices.Contains(dev);
+        if (!alreadyOpen)
         {
-            dev.Open(DeviceModes.None);
-        }
-        catch
-        {
-            alreadyOpen = true;
+            try { dev.Open(DeviceModes.None); }
+            catch { alreadyOpen = true; }
         }
 
         try
@@ -426,6 +443,8 @@ public class LabWorkerService : IDisposable
                 dev.SendPacket(frame);
                 framesSent++;
                 bytesSent += frame.Length;
+                if (intervalMs > 0 && i < count - 1)
+                    await Task.Delay(intervalMs);
             }
         }
         finally
@@ -435,8 +454,6 @@ public class LabWorkerService : IDisposable
                 try { dev.Close(); } catch { }
             }
         }
-
-        await Task.CompletedTask;
 
         var stdout = new JsonObject
         {
@@ -473,9 +490,12 @@ public class LabWorkerService : IDisposable
         int framesSent = 0;
         long bytesSent = 0;
 
-        bool alreadyOpen = false;
-        try { dev.Open(DeviceModes.None); }
-        catch { alreadyOpen = true; }
+        bool alreadyOpen = _captureDevices.Contains(dev);
+        if (!alreadyOpen)
+        {
+            try { dev.Open(DeviceModes.None); }
+            catch { alreadyOpen = true; }
+        }
 
         try
         {
@@ -502,12 +522,29 @@ public class LabWorkerService : IDisposable
     // Command: status
     // =========================================================================
 
-    private JsonObject GetStatus() => new()
+    private JsonObject GetStatus()
     {
-        ["workerId"]     = _workerId,
-        ["capturing"]    = _isCapturing,
-        ["captureCount"] = _captureBuffer.Count
-    };
+        var nics = NetworkInterface.GetAllNetworkInterfaces();
+        var captureIfaceNames = new JsonArray();
+        foreach (var dev in _captureDevices)
+        {
+            var mac = dev.MacAddress?.GetAddressBytes();
+            if (mac?.Length == 6)
+            {
+                var nic = nics.FirstOrDefault(n => n.GetPhysicalAddress().GetAddressBytes().SequenceEqual(mac));
+                if (nic != null) captureIfaceNames.Add(nic.Name);
+                else             captureIfaceNames.Add(dev.Name);
+            }
+            else captureIfaceNames.Add(dev.Name);
+        }
+        return new JsonObject
+        {
+            ["workerId"]          = _workerId,
+            ["capturing"]         = _isCapturing,
+            ["captureCount"]      = _captureBuffer.Count,
+            ["captureInterfaces"] = captureIfaceNames
+        };
+    }
 
     // =========================================================================
     // Command: startcapture
@@ -993,6 +1030,12 @@ public class LabWorkerService : IDisposable
         var rows = await DispatchToUiAsync(() => RequireAutomationVm().GetResultsSnapshot());
         var arr  = JsonNode.Parse(JsonSerializer.Serialize(rows, _jsonOpts))?.AsArray() ?? new JsonArray();
         return new JsonObject { ["rows"] = arr };
+    }
+
+    private async Task<JsonObject> AutoStopAsync()
+    {
+        await DispatchToUiAsync<bool>(() => { RequireAutomationVm().StopTest(); return true; });
+        return new JsonObject { ["ok"] = true };
     }
 
     // =========================================================================
