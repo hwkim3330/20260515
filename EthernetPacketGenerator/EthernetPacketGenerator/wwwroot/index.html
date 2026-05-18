@@ -26,6 +26,14 @@
           <span>http://localhost:8080</span>
         </div>
       </div>
+      <div class="peer-card" title="상대 PC (Peer PC) URL 설정 — 두 PC 상호제어용">
+        <span id="peerState" class="state-dot"></span>
+        <div>
+          <input id="peerUrl" placeholder="http://192.168.1.x:8080" style="width:190px;font-size:12px">
+          <button id="peerProbe" class="small" style="margin-left:4px">Probe</button>
+        </div>
+        <span style="font-size:11px;color:var(--muted,#888)" id="peerLabel">Peer PC</span>
+      </div>
     </header>
 
     <nav class="tabs" aria-label="Main views">
@@ -94,15 +102,30 @@
     <section id="captureView" class="view capture-layout">
       <aside class="panel side-panel">
         <div class="panel-head">
-          <h2>Capture Interfaces</h2>
+          <h2>This PC Capture</h2>
           <button id="captureRefresh" class="small">Refresh</button>
         </div>
-        <p class="hint">Check multiple NICs to capture at the same time.</p>
+        <p class="hint">여러 NIC 동시 캡처 가능.</p>
         <div id="captureInterfaces" class="check-list"></div>
         <div class="stack-actions">
-          <button id="captureStart" class="primary">Start Capture</button>
-          <button id="captureStop" class="danger">Stop</button>
+          <button id="captureStart" class="primary">▶ Start</button>
+          <button id="captureStop" class="danger">■ Stop</button>
           <button id="captureClear" class="secondary">Clear</button>
+        </div>
+
+        <hr style="margin:12px 0;border-color:var(--border,#ddd)">
+        <div class="panel-head" style="margin-bottom:6px">
+          <h2>Peer PC Capture</h2>
+          <span id="peerCaptureState" class="state-dot"></span>
+        </div>
+        <p class="hint">상대 PC 인터페이스 — topbar에서 Peer URL을 설정하세요.</p>
+        <div id="peerCaptureInterfaces" class="check-list">
+          <p class="empty" style="font-size:12px">Peer URL → Probe 후 표시됩니다.</p>
+        </div>
+        <div class="stack-actions">
+          <button id="peerCaptureStart" class="primary">▶ Start Peer</button>
+          <button id="peerCaptureStop" class="danger">■ Stop Peer</button>
+          <button id="peerCaptureFetch" class="secondary">↓ Fetch Packets</button>
         </div>
       </aside>
 

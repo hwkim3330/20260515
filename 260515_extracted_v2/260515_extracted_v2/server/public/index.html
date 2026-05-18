@@ -23,6 +23,10 @@
               <li><kbd>2</kbd>  Capture</li>
               <li><kbd>3</kbd>  Control</li>
               <li><kbd>4</kbd>  Serial</li>
+              <li><kbd>5</kbd>  Register</li>
+              <li><kbd>6</kbd>  FDB</li>
+              <li><kbd>7</kbd>  Auto</li>
+              <li><kbd>8</kbd>  Lab</li>
             </ul>
           </section>
           <section>
@@ -77,14 +81,11 @@
 
       <section class="toolbar">
         <div class="modeTabs">
-          <button class="modeTab active" data-view="senderView">Sender</button>
+          <button class="modeTab active" data-view="senderView">Packet Generator</button>
+          <button class="modeTab" data-view="labView">Scenario Lab</button>
+          <button class="modeTab" data-view="captureAddressView">Capture Address</button>
           <button class="modeTab" data-view="captureView">Capture</button>
-          <button class="modeTab" data-view="controlView">Control</button>
-          <button class="modeTab" data-view="serialView">Serial</button>
-          <button class="modeTab" data-view="registerView">Register</button>
-          <button class="modeTab" data-view="fdbView">FDB</button>
-          <button class="modeTab" data-view="autoView">Auto</button>
-          <button class="modeTab" data-view="labView">Lab</button>
+          <button class="modeTab" data-view="hyperTerminalView">HyperTerminal</button>
         </div>
         <select id="interfaceSelect" hidden multiple></select>
         <div id="interfaceInfo" class="muted"></div>
@@ -336,6 +337,74 @@
           </section>
         </section>
 
+        <!-- ── Capture Address View ─────────────────────────────────── -->
+        <section id="captureAddressView" class="roleView">
+
+          <!-- Row 0: Peer URL bar -->
+          <div class="caPeerBar">
+            <label class="caPeerLabel">Peer URL
+              <input id="caPeerUrl" class="caPeerInput" value="http://localhost:8080" autocomplete="off" spellcheck="false">
+            </label>
+            <select id="caWorkerSelect" class="caWorkerSelect" title="Select a connected worker to autofill URL">
+              <option value="">— or select connected worker —</option>
+            </select>
+            <button id="caProbeBtn" class="primaryAction" style="min-height:34px;padding:0 16px;">Probe</button>
+            <span id="caPeerStatus" class="caPeerStatus"></span>
+          </div>
+
+          <!-- Row 1: Interface chips + capture controls -->
+          <div class="caIfaceBar">
+            <div id="caIfaceList" class="caIfaceList">← Probe peer first</div>
+            <div class="caControls">
+              <button id="caStartBtn" class="primaryAction wsStart" disabled>▶ Start Capture</button>
+              <button id="caStopBtn" class="ghostBtn wsStop" disabled>■ Stop</button>
+              <button id="caClearBtn" class="ghostBtn">Clear</button>
+            </div>
+          </div>
+
+          <!-- Row 2: Target address + PASS/FAIL check -->
+          <div class="caAddrRow">
+            <label class="caAddrLabel">Target Address
+              <input id="caAddrInput" class="caAddrInputEl" placeholder="self / 192.168.1.1 / AA:BB:CC:DD:EE:FF" autocomplete="off">
+            </label>
+            <button id="caCheckBtn" class="ghostBtn" style="min-height:34px;padding:0 14px;font-size:.82rem;">Check</button>
+            <span id="caResult" class="caResult"></span>
+          </div>
+
+          <!-- Row 3: Packet table header -->
+          <div class="caPacketWrap">
+            <div class="caTableHeader">
+              <span id="caPacketCount" class="muted">0 packets</span>
+              <input id="caDisplayFilter" class="caDisplayFilter" placeholder="display filter: mac: / ip: / tcp / udp…" autocomplete="off">
+            </div>
+            <div class="caPacketList" id="caPacketList">
+              <table>
+                <thead>
+                  <tr>
+                    <th class="colNum">#</th>
+                    <th class="colTime">Time</th>
+                    <th class="colIface">Interface</th>
+                    <th class="colSrcMac">Src MAC</th>
+                    <th class="colDstMac">Dst MAC</th>
+                    <th class="colSrc">Source</th>
+                    <th class="colDst">Destination</th>
+                    <th class="colProto">Protocol</th>
+                    <th class="colLen">Len</th>
+                    <th>Info</th>
+                  </tr>
+                </thead>
+                <tbody id="caRows"></tbody>
+              </table>
+              <div id="caPacketEmpty" class="empty wsEmpty">Probe the peer, select an interface, then press <strong>Start Capture</strong>.</div>
+            </div>
+          </div>
+
+          <!-- Row 4: Selected packet detail -->
+          <div class="caDetailPane hidden" id="caDetailPane">
+            <pre id="caDetailText" class="caDetailPre"></pre>
+          </div>
+        </section>
+
         <section id="captureView" class="roleView captureViewWS">
           <section class="workPane wiresharkPane">
             <div class="ifacePicker ifacePickerHoriz" id="captureIfacePicker">
@@ -358,6 +427,7 @@
                 <span>Auto-scroll</span>
               </label>
               <input id="captureDisplayFilter" autocomplete="off" placeholder="display filter — tcp / udp / icmp[v6] / arp / vlan / ipv6 / lldp / ptp / dns / dhcp / mac:.. / ip:.." title="Display filter — applied client-side after decode. Tokens: tcp udp icmp icmpv6 arp vlan ipv4 ipv6 lldp ptp lacp dns dhcp ntp mdns / mac:&lt;substr&gt; / ip:&lt;substr&gt; / port:&lt;number&gt; / any substring of decoded JSON.">
+              <span id="captureBpfBadge" class="captureBpfBadge hidden">BPF: <code id="captureBpfText"></code></span>
               <div class="captureStats">
                 <span class="statChip"><span>pkts</span><strong id="capStatPkts">0</strong></span>
                 <span class="statChip"><span>pps</span><strong id="capStatPps">0</strong></span>
@@ -381,6 +451,8 @@
                     <th class="colNum">#</th>
                     <th class="colTime">Time</th>
                     <th class="colIface">Interface</th>
+                    <th class="colSrcMac">Src MAC</th>
+                    <th class="colDstMac">Dst MAC</th>
                     <th class="colSrc">Source</th>
                     <th class="colDst">Destination</th>
                     <th class="colProto">Protocol</th>
@@ -405,7 +477,16 @@
           </section>
         </section>
 
-        <section id="serialView" class="roleView serialViewTT">
+        <section id="hyperTerminalView" class="roleView htView">
+          <div class="htSubTabBar">
+            <button class="htSubTab active" data-htview="serialView">Serial</button>
+            <button class="htSubTab" data-htview="registerView">Register</button>
+            <button class="htSubTab" data-htview="fdbView">FDB</button>
+            <button class="htSubTab" data-htview="autoView">Auto</button>
+            <button class="htSubTab" data-htview="controlView">Control</button>
+          </div>
+
+        <section id="serialView" class="htSubView active serialViewTT">
           <section class="workPane serialPane">
             <div class="serialBar">
               <select id="serialPort"><option value="">no TTY found</option></select>
@@ -451,10 +532,29 @@
               <button id="serialClear" class="ghostBtn small">Clear</button>
               <button id="serialBreak" class="ghostBtn small" title="Send a serial break" disabled>BRK</button>
             </div>
+            <!-- ── Serial Macro Buttons ──────────────────────────────────── -->
+            <div class="serialMacroBar" id="serialMacroBar">
+              <span class="serialMacroLabel">Macros:</span>
+              <div class="serialMacroBtns" id="serialMacroBtns"></div>
+              <button id="serialMacroManage" class="ghostBtn small" title="Add / remove macro buttons">⚙ Edit</button>
+            </div>
+            <div id="serialMacroPanel" class="serialMacroPanel hidden">
+              <div class="serialMacroForm">
+                <input id="macroLabel" placeholder="Button label" autocomplete="off" style="width:95px">
+                <input id="macroText" placeholder="Text to send (\\r = CR, \\n = LF)" autocomplete="off" style="flex:1;min-width:160px">
+                <select id="macroEolSel" title="EOL appended after text">
+                  <option value="">No EOL</option>
+                  <option value="\r\n">CRLF</option>
+                  <option value="\r" selected>CR</option>
+                  <option value="\n">LF</option>
+                </select>
+                <button id="macroAddBtn" class="primaryAction" style="min-height:28px;padding:0 12px;font-size:.82rem;">+ Add</button>
+              </div>
+            </div>
           </section>
         </section>
 
-        <section id="controlView" class="roleView controlView">
+        <section id="controlView" class="htSubView htControlView">
           <section class="workPane controlPane controlPaneFull">
             <div class="pairCard" id="pairCard">
               <div class="pairSide">
@@ -499,10 +599,21 @@
 
             <div class="controlTopology">
               <div class="controlTopologyHead">
-                <strong>4-Port Topology</strong>
+                <strong>6-Port Switch Topology</strong>
                 <span id="controlTopologySummary">waiting for interfaces</span>
               </div>
               <svg id="controlTopologySvg" viewBox="0 0 920 260" role="img" aria-label="Selected Ethernet port topology"></svg>
+            </div>
+
+            <div id="portMonitorPanel" class="portMonitorPanel">
+              <div class="portMonitorHead">
+                <strong>6-Port Switch Link Status</strong>
+                <span id="portMonitorTime" class="muted" style="font-size:.8rem;"></span>
+                <button id="portMonitorRefresh" class="ghostBtn small">↻</button>
+              </div>
+              <div id="portMonitorGrid" class="portMonitorGrid">
+                <div class="portMonitorPlaceholder">MDIO 링크 상태 읽는 중...</div>
+              </div>
             </div>
 
             <div class="suiteCard">
@@ -544,6 +655,67 @@
                   </thead>
                   <tbody id="controlPacketRows"></tbody>
                 </table>
+              </div>
+            </div>
+
+            <!-- ── Timestamp Panel ── -->
+            <div class="simpleCard" id="timestampCard" style="margin-bottom:14px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                <strong>Timestamp (PTP Clock)</strong>
+                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                  <span id="timestampDisplay" style="font-family:monospace;font-size:.9rem;color:var(--accent);">—</span>
+                  <button id="timestampReadBtn" class="ghostBtn small">Read</button>
+                  <button id="timestampStatusBtn" class="ghostBtn small">Status</button>
+                </div>
+              </div>
+
+              <details style="margin-top:.7rem;">
+                <summary style="cursor:pointer;font-size:.82rem;font-weight:600;color:var(--accent-strong);">Set Time</summary>
+                <div style="display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end;margin-top:.5rem;">
+                  <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.3rem;">Year<input id="tsYear" class="monoInput" type="number" value="2025" style="width:70px;"></label>
+                  <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.3rem;">Month<input id="tsMonth" class="monoInput" type="number" min="1" max="12" value="1" style="width:55px;"></label>
+                  <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.3rem;">Day<input id="tsDay" class="monoInput" type="number" min="1" max="31" value="1" style="width:55px;"></label>
+                  <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.3rem;">Hour<input id="tsHour" class="monoInput" type="number" min="0" max="23" value="0" style="width:55px;"></label>
+                  <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.3rem;">Min<input id="tsMin" class="monoInput" type="number" min="0" max="59" value="0" style="width:55px;"></label>
+                  <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.3rem;">Sec<input id="tsSec" class="monoInput" type="number" min="0" max="59" value="0" style="width:55px;"></label>
+                  <button id="tsSetNowBtn" class="ghostBtn small" title="Fill with current local time">Now</button>
+                  <button id="tsSetBtn" class="primaryAction" style="min-height:28px;">Set Time</button>
+                </div>
+                <div id="tsSetResult" class="simpleResult" style="margin-top:.4rem;"></div>
+              </details>
+
+              <div id="tsStatusResult" class="simpleResult" style="margin-top:.4rem;"></div>
+            </div>
+
+            <!-- ── Counter Panel ── -->
+            <div class="simpleCard" id="counterCard" style="margin-bottom:14px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                <strong>Port Counters</strong>
+                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                  <label style="font-size:.8rem;display:flex;align-items:center;gap:.4rem;">
+                    Port
+                    <select id="counterPort" class="monoInput" style="width:90px;">
+                      <option value="all">All</option>
+                      <option value="0">Port 0</option>
+                      <option value="1">Port 1</option>
+                      <option value="2">Port 2</option>
+                      <option value="3">Port 3</option>
+                      <option value="4">Port 4</option>
+                      <option value="5">Port 5</option>
+                    </select>
+                  </label>
+                  <button id="counterReadBtn" class="primaryAction" style="min-height:28px;">Read</button>
+                  <span id="counterStatus" class="muted" style="font-size:.8rem;"></span>
+                </div>
+              </div>
+              <div id="counterTableWrap" style="overflow-x:auto;margin-top:.6rem;">
+                <table class="captureTable" id="counterTable" style="display:none;">
+                  <thead>
+                    <tr><th>Group</th><th>Name</th><th>Address</th><th>Value (hex)</th><th>Value (dec)</th></tr>
+                  </thead>
+                  <tbody id="counterRows"></tbody>
+                </table>
+                <div id="counterEmpty" class="muted" style="font-size:.85rem;padding:4px;">카운터를 읽으려면 Read를 누르세요.</div>
               </div>
             </div>
 
@@ -627,6 +799,19 @@
                   <a id="openRfc" class="linkButton" href="/reports/rfc2544-latest.html" target="_blank" rel="noreferrer">Open</a>
                 </div>
               </div>
+            </div>
+
+            <div id="benchChartPanel" class="expChartPanel hidden">
+              <div class="expChartHead"><strong>Benchmark — Throughput by Pair</strong></div>
+              <div id="benchChart" class="expChartBody"></div>
+            </div>
+            <div id="rfcChartPanel" class="expChartPanel hidden">
+              <div class="expChartHead"><strong>RFC 2544 — Utilization vs Frame Size</strong></div>
+              <div id="rfcChart" class="expChartBody"></div>
+            </div>
+            <div id="sweepChartPanel" class="expChartPanel hidden">
+              <div class="expChartHead"><strong>Frame-Size Sweep — Throughput &amp; Loss</strong></div>
+              <div id="sweepChart" class="expChartBody"></div>
             </div>
 
             <details class="advancedForwarding">
@@ -758,11 +943,62 @@
         </section>
 
         <!-- ── Register View ─────────────────────────────────── -->
-        <section id="registerView" class="roleView">
+        <section id="registerView" class="htSubView">
           <section class="workPane">
-            <div class="sectionTitle">Register Read / Write</div>
+            <div class="sectionTitle">Register</div>
             <div id="regStatus" class="muted" style="font-size:.85rem;">상태 불러오는 중...</div>
 
+            <!-- ── System Control Panel ── -->
+            <div class="simpleCard sysCtrlCard">
+              <div class="sysCtrlHead">
+                <strong>System Control</strong>
+                <div class="sysCtrlHeadRight">
+                  <label style="font-size:.8rem;display:flex;align-items:center;gap:.5rem;">
+                    Base Address
+                    <input id="regBaseAddress" class="monoInput" value="0x44A00000" style="width:130px;" autocomplete="off">
+                  </label>
+                  <button id="regReadAllBtn" class="primaryAction sysCtrlReadAll">Read All</button>
+                  <button id="regLoadDefaultsBtn" class="ghostBtn">Load Defaults</button>
+                </div>
+              </div>
+              <div id="regVersionDisplay" class="sysCtrlVersion">—</div>
+
+              <!-- Port Enable -->
+              <div class="sysCtrlSection">
+                <div class="sysCtrlSectionLabel">Port Enable</div>
+                <div class="sysCtrlPortRow">
+                  <label class="sysCtrlCheck"><input id="regP0" type="checkbox" checked><span>P0</span></label>
+                  <label class="sysCtrlCheck"><input id="regP1" type="checkbox" checked><span>P1</span></label>
+                  <label class="sysCtrlCheck"><input id="regP2" type="checkbox" checked><span>P2</span></label>
+                  <label class="sysCtrlCheck"><input id="regP3" type="checkbox" checked><span>P3</span></label>
+                  <label class="sysCtrlCheck"><input id="regP4" type="checkbox" checked><span>P4</span></label>
+                  <label class="sysCtrlCheck"><input id="regP5" type="checkbox" checked><span>P5</span></label>
+                  <label class="sysCtrlCheck"><input id="regP6" type="checkbox" checked><span>P6</span></label>
+                  <label class="sysCtrlCheck"><input id="regP7" type="checkbox" checked><span>P7</span></label>
+                  <span class="sysCtrlSep"></span>
+                  <label class="sysCtrlCheck sysCtrlCheckTsgw"><input id="regTsgwEnable" type="checkbox" checked><span>TSGW Enable</span></label>
+                  <button id="regApplyEnableBtn" class="ghostBtn sysCtrlApplyBtn">Apply Enable</button>
+                </div>
+              </div>
+
+              <!-- AHB Wait -->
+              <div class="sysCtrlSection">
+                <div class="sysCtrlSectionLabel">AHB Host I/F</div>
+                <div class="sysCtrlAhbRow">
+                  <label class="sysCtrlNumLabel">WR Wait (0–15)
+                    <input id="regAhbWrWait" class="monoInput" type="number" min="0" max="15" value="15" style="width:70px;">
+                  </label>
+                  <label class="sysCtrlNumLabel">RD Wait (0–15)
+                    <input id="regAhbRdWait" class="monoInput" type="number" min="0" max="15" value="15" style="width:70px;">
+                  </label>
+                  <button id="regApplyAhbBtn" class="ghostBtn sysCtrlApplyBtn">Apply AHB</button>
+                </div>
+              </div>
+
+              <div id="regSysCtrlStatus" class="sysCtrlStatus"></div>
+            </div>
+
+            <!-- ── Register Read / Write ── -->
             <div class="simpleCardRow">
               <!-- Read -->
               <div class="simpleCard">
@@ -794,16 +1030,130 @@
                 <div id="regWriteResult" class="simpleResult"></div>
               </div>
             </div>
+            <!-- ── MDIO / PHY ── -->
+            <div class="simpleCard" id="mdioCard">
+              <strong>MDIO / PHY Access</strong>
+
+              <!-- PHY Read / Write -->
+              <div class="simpleCardRow" style="align-items:flex-end;gap:.8rem;flex-wrap:wrap;">
+                <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.4rem;">
+                  Port <small class="muted">(0–5)</small>
+                  <select id="mdioPort" class="monoInput" style="width:80px;">
+                    <option value="0">Port 0</option>
+                    <option value="1">Port 1</option>
+                    <option value="2">Port 2</option>
+                    <option value="3">Port 3</option>
+                    <option value="4">Port 4</option>
+                    <option value="5">Port 5</option>
+                  </select>
+                </label>
+                <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.4rem;">
+                  PHY Addr <small class="muted">(hex)</small>
+                  <input id="mdioPhyAddr" class="monoInput" value="0x00" style="width:80px;" autocomplete="off">
+                </label>
+                <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.4rem;">
+                  Reg Addr <small class="muted">(hex)</small>
+                  <input id="mdioRegAddr" class="monoInput" value="0x01" style="width:80px;" autocomplete="off">
+                </label>
+                <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.4rem;">
+                  Write Value <small class="muted">(hex)</small>
+                  <input id="mdioWriteValue" class="monoInput" placeholder="0x0000" style="width:100px;" autocomplete="off">
+                </label>
+                <div class="simpleCardActions" style="flex-direction:column;gap:.4rem;">
+                  <button id="mdioReadBtn" class="primaryAction">PHY Read</button>
+                  <button id="mdioWriteBtn" class="primaryAction">PHY Write</button>
+                </div>
+              </div>
+              <div id="mdioAccResult" class="simpleResult" style="color:var(--accent);"></div>
+
+              <!-- Link Status -->
+              <div style="display:flex;align-items:center;gap:.8rem;margin-top:.6rem;flex-wrap:wrap;">
+                <button id="mdioLinkStatusBtn" class="ghostBtn">Read Link Status (all ports)</button>
+                <div id="mdioLinkGrid" style="display:flex;gap:.5rem;flex-wrap:wrap;"></div>
+              </div>
+
+              <!-- MDIO Setup -->
+              <details style="margin-top:.8rem;">
+                <summary style="cursor:pointer;font-size:.82rem;font-weight:600;color:var(--accent-strong);">MDIO Setup (clock / enable)</summary>
+                <div style="margin-top:.6rem;display:flex;flex-wrap:wrap;gap:.8rem;align-items:flex-end;">
+                  <label class="sysCtrlCheck"><input id="mdioSetupEnable" type="checkbox" checked><span>Enable</span></label>
+                  <label class="sysCtrlCheck"><input id="mdioSetupPreDisable" type="checkbox"><span>PreDisable</span></label>
+                  <label class="sysCtrlCheck"><input id="mdioSetupIntrEnable" type="checkbox"><span>IntEnable</span></label>
+                  <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.4rem;">
+                    Target MHz
+                    <input id="mdioTargetMhz" class="monoInput" value="2.5" style="width:80px;" type="number" min="0.1" step="0.1" max="12.5">
+                  </label>
+                  <button id="mdioSetupApplyBtn" class="ghostBtn sysCtrlApplyBtn">Apply Setup</button>
+                </div>
+                <div id="mdioSetupResult" class="simpleResult" style="margin-top:.4rem;"></div>
+              </details>
+            </div>
+
           </section>
         </section>
 
         <!-- ── FDB View ──────────────────────────────────────── -->
-        <section id="fdbView" class="roleView">
+        <section id="fdbView" class="htSubView">
           <section class="workPane">
             <div class="sectionTitle">FDB (Forwarding Database)</div>
 
+            <!-- ── FDB Control Panel ── -->
+            <div class="simpleCard fdbCtrlCard">
+              <div class="sysCtrlHead">
+                <strong>FDB Control</strong>
+                <div class="sysCtrlHeadRight">
+                  <button id="fdbReadStatusBtn" class="primaryAction sysCtrlReadAll">Read Status</button>
+                  <button id="fdbLoadDefaultsBtn" class="ghostBtn">FDB Load Defaults</button>
+                </div>
+              </div>
+              <div id="fdbVersionDisplay" class="sysCtrlVersion">—</div>
+
+              <!-- Enable flags -->
+              <div class="sysCtrlSection">
+                <div class="sysCtrlSectionLabel">Enable Flags (0xA0C)</div>
+                <div class="sysCtrlPortRow">
+                  <label class="sysCtrlCheck"><input id="fdbAgeScanEnable" type="checkbox"><span>AgeScan [bit4]</span></label>
+                  <label class="sysCtrlCheck"><input id="fdbLearningEnable" type="checkbox"><span>Learning [bit1]</span></label>
+                  <label class="sysCtrlCheck"><input id="fdbLookupEnable" type="checkbox"><span>Lookup [bit0]</span></label>
+                  <button id="fdbApplyEnableBtn" class="ghostBtn sysCtrlApplyBtn">Apply Enable</button>
+                </div>
+              </div>
+
+              <!-- Age / Threshold -->
+              <div class="sysCtrlSection">
+                <div class="sysCtrlSectionLabel">Aging</div>
+                <div class="sysCtrlAhbRow">
+                  <label class="sysCtrlNumLabel">Age Period (ns) <small class="muted">0xA10</small>
+                    <input id="fdbAgePeriodNs" class="monoInput" type="number" min="0" value="0" style="width:120px;">
+                  </label>
+                  <label class="sysCtrlNumLabel">Aging Threshold (×100ms) <small class="muted">0xA14</small>
+                    <input id="fdbAgingThr" class="monoInput" type="number" min="0" value="0" style="width:120px;">
+                  </label>
+                  <button id="fdbApplyAgingBtn" class="ghostBtn sysCtrlApplyBtn">Apply Aging</button>
+                </div>
+              </div>
+
+              <div id="fdbCtrlStatus" class="sysCtrlStatus"></div>
+            </div>
+
+            <!-- ── FDB Bucket Read ── -->
             <div class="simpleCard">
-              <strong>공통 입력</strong>
+              <strong>Bucket Read (CMD=0x13)</strong>
+              <div class="sysCtrlAhbRow" style="align-items:flex-end;">
+                <label class="sysCtrlNumLabel">Bucket (0–1023)
+                  <input id="fdbBucketNum" class="monoInput" type="number" min="0" max="1023" value="0" style="width:100px;">
+                </label>
+                <label class="sysCtrlNumLabel">Slot bitmap (0x1–0xF)
+                  <input id="fdbSlotBitmap" class="monoInput" placeholder="0x1" style="width:80px;" autocomplete="off">
+                </label>
+                <button id="fdbBucketReadBtn" class="primaryAction">Bucket Read</button>
+              </div>
+              <div id="fdbBucketResult" class="simpleResult">버킷 읽기 결과가 여기 표시됩니다.</div>
+            </div>
+
+            <!-- ── Hash Read / Write / Delete / Flush ── -->
+            <div class="simpleCard">
+              <strong>Hash Lookup (MAC + VLAN)</strong>
               <div class="simpleCardRow cols3" style="align-items:end;">
                 <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.4rem;">
                   MAC Address
@@ -819,12 +1169,12 @@
               </div>
               <label style="font-size:.8rem;display:flex;flex-direction:column;gap:.4rem;max-width:120px;">
                 Port <small class="muted">(write 전용)</small>
-                <input id="fdbPort" class="monoInput" placeholder="1" type="number" min="1" max="8">
+                <input id="fdbPort" class="monoInput" placeholder="1" type="number" min="0" max="511">
               </label>
               <div class="simpleCardActions">
-                <button id="fdbReadBtn"   class="primaryAction">Read</button>
-                <button id="fdbWriteBtn"  class="primaryAction">Write</button>
-                <button id="fdbDeleteBtn" class="primaryAction dangerAction">Delete</button>
+                <button id="fdbReadBtn"   class="primaryAction">Hash Read</button>
+                <button id="fdbWriteBtn"  class="primaryAction">Hash Write</button>
+                <button id="fdbDeleteBtn" class="primaryAction dangerAction">Hash Delete</button>
                 <button id="fdbFlushBtn"  class="primaryAction dangerAction">Flush All</button>
               </div>
             </div>
@@ -834,7 +1184,7 @@
         </section>
 
         <!-- ── Auto View ─────────────────────────────────────── -->
-        <section id="autoView" class="roleView">
+        <section id="autoView" class="htSubView">
           <section class="workPane">
             <div class="sectionTitle">Automation Test</div>
 
@@ -869,25 +1219,105 @@
           </section>
         </section>
 
+        </section><!-- /#hyperTerminalView -->
+
         <section id="labView" class="roleView">
           <section class="workPane">
 
-            <!-- Sequence Sender -->
+            <!-- Sequence Builder + Sender -->
             <div class="simpleCard">
-              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;">
-                <strong>Sequence Sender</strong>
-                <div style="display:flex;gap:8px;">
-                  <button id="tcRunSequence" class="primaryAction small">&#9654; Run Sequence</button>
-                  <button id="tcSaveCurrent" class="ghostBtn small">Save to TC</button>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;">
+                <strong>Sequence Builder</strong>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button id="tcRunSequence" class="primaryAction" style="min-height:30px;padding:0 12px;font-size:.82rem;">&#9654; Run</button>
+                  <button id="tcSaveCurrent" class="ghostBtn" style="min-height:30px;padding:0 10px;font-size:.82rem;">Save to TC</button>
+                  <button id="seqRefreshFull" class="ghostBtn" style="min-height:30px;padding:0 10px;font-size:.82rem;">↻</button>
                 </div>
               </div>
-              <div style="overflow-x:auto;">
+
+              <!-- Quick-add preset buttons -->
+              <div class="seqPresetBar" id="seqPresetBar">
+                <span class="seqPresetLabel">Quick:</span>
+                <button class="seqPreset" data-preset="delay100">⏱ 100ms</button>
+                <button class="seqPreset" data-preset="delay1s">⏱ 1s</button>
+                <button class="seqPreset" data-preset="flushFdb">🗑 Flush FDB</button>
+                <button class="seqPreset" data-preset="readBmsr">⤷ BMSR</button>
+                <button class="seqPreset" data-preset="waitLink">⏳ Wait Link↑</button>
+                <span class="seqPresetSep"></span>
+                <div id="seqCustomPresets" style="display:contents"></div>
+                <button id="seqSavePreset" class="ghostBtn" style="min-height:24px;font-size:.78rem;padding:0 8px;" title="Save current form state as a reusable preset button">★ Save preset</button>
+              </div>
+
+              <!-- Event adder form -->
+              <div class="seqBuilderRow">
+                <label class="seqBuilderLabel">Type
+                  <select id="seqEventType">
+                    <option value="Delay">⏱ Delay</option>
+                    <option value="RegWrite">✎ Reg Write</option>
+                    <option value="RegRead">⤷ Reg Read</option>
+                    <option value="RegWaitFor">⏳ Reg Wait-For</option>
+                    <option value="FdbWrite">📋 FDB Write</option>
+                    <option value="FdbRead">🔍 FDB Read</option>
+                    <option value="FdbWaitFor">⏳ FDB Wait-For</option>
+                    <option value="FdbFlush">🗑 FDB Flush</option>
+                    <option value="SerialSend">→ Serial Send</option>
+                    <option value="SerialVerify">⏳ Serial Verify</option>
+                    <option value="CaptureVerify">📡 Capture Verify</option>
+                  </select>
+                </label>
+                <label id="seqDelayField" class="seqBuilderLabel">Delay ms
+                  <input id="seqDelayMs" type="number" value="100" min="0" class="monoInput" style="width:80px;">
+                </label>
+                <label id="seqAddrField" class="seqBuilderLabel hidden">Address
+                  <input id="seqAddress" placeholder="0x0000" class="monoInput" style="width:110px;" autocomplete="off">
+                </label>
+                <label id="seqValueField" class="seqBuilderLabel hidden">Value
+                  <input id="seqValue" placeholder="0x00000000" class="monoInput" style="width:110px;" autocomplete="off">
+                </label>
+                <label id="seqMaskField" class="seqBuilderLabel hidden">Mask
+                  <input id="seqMask" placeholder="0xFFFFFFFF" class="monoInput" style="width:110px;" autocomplete="off">
+                </label>
+                <label id="seqExpectedField" class="seqBuilderLabel hidden">Expected
+                  <input id="seqExpected" placeholder="0x00000000" class="monoInput" style="width:110px;" autocomplete="off">
+                </label>
+                <label id="seqTimeoutField" class="seqBuilderLabel hidden">Timeout ms
+                  <input id="seqTimeout" type="number" value="1000" min="0" class="monoInput" style="width:80px;">
+                </label>
+                <label id="seqMacField" class="seqBuilderLabel hidden">MAC
+                  <input id="seqMac" placeholder="AA:BB:CC:DD:EE:FF" class="monoInput" style="width:150px;" autocomplete="off">
+                </label>
+                <label id="seqPortField" class="seqBuilderLabel hidden">Port
+                  <input id="seqPort" type="number" value="0" min="0" max="7" class="monoInput" style="width:60px;">
+                </label>
+                <label id="seqSerialTextField" class="seqBuilderLabel hidden">Text / Pattern
+                  <input id="seqSerialText" placeholder="AT\r or expected..." class="monoInput" style="width:180px;" autocomplete="off">
+                </label>
+                <label id="seqSerialHexField" class="seqBuilderLabel hidden">Hex bytes
+                  <input id="seqSerialHex" placeholder="0d 0a ..." class="monoInput" style="width:140px;" autocomplete="off">
+                </label>
+                <label id="seqCaptureIfaceField" class="seqBuilderLabel hidden">Interface
+                  <input id="seqCaptureIface" placeholder="eth0" class="monoInput" style="width:120px;" autocomplete="off">
+                </label>
+                <label id="seqCaptureFilterField" class="seqBuilderLabel hidden">Filter
+                  <input id="seqCaptureFilter" placeholder="udp / mac:aa:bb" class="monoInput" style="width:160px;" autocomplete="off">
+                </label>
+                <label id="seqCaptureExpectedField" class="seqBuilderLabel hidden">Min pkts
+                  <input id="seqCaptureExpected" type="number" value="1" min="1" class="monoInput" style="width:70px;">
+                </label>
+                <div style="display:flex;gap:6px;align-items:flex-end;margin-top:1rem;">
+                  <button id="seqAddEvent" class="primaryAction" style="min-height:30px;padding:0 14px;font-size:.82rem;">+ Add</button>
+                  <button id="seqClearEvents" class="ghostBtn" style="min-height:30px;padding:0 10px;font-size:.82rem;color:#b91c1c;border-color:#b91c1c;">Clear</button>
+                </div>
+              </div>
+
+              <!-- Active sequence table -->
+              <div style="overflow-x:auto;margin-top:10px;">
                 <table class="captureTable">
                   <thead>
-                    <tr><th>#</th><th>Kind</th><th>On</th><th>Name</th><th>Address</th><th>Value</th><th>Mask</th><th>Timing</th></tr>
+                    <tr><th>#</th><th>Kind</th><th>Type</th><th>Label / Details</th><th>Address</th><th>Value</th><th>Timing</th><th></th></tr>
                   </thead>
                   <tbody id="sequenceRows">
-                    <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:1rem;">No sequence items</td></tr>
+                    <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:1rem;">No sequence items — add an event above or select a test case</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -918,6 +1348,8 @@
 
       </section>
     </main>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

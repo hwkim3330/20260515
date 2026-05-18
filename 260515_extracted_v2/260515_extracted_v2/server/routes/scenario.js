@@ -37,4 +37,13 @@ router.get ('/app/status',      async (req, res) => { try { res.json({ ok: true,
 router.get ('/sequence/status', async (req, res) => { try { res.json({ ok: true, ...(await localCmd(req, 'sequencestatus', {},       5000) || {}) }); } catch (e) { wErr(res, e); } });
 router.post('/sequence/run',    async (req, res) => { try { res.json({ ok: true, ...(await localCmd(req, 'sequencerun',    {},      10000) || {}) }); } catch (e) { wErr(res, e); } });
 
+// 6-port switch link status (via MDIO)
+router.get ('/ports/link-status', async (req, res) => { try { res.json({ ok: true, ...(await localCmd(req, 'portslinkstatus', {}, 15000) || {}) }); } catch (e) { wErr(res, e); } });
+
+// Sequence event builder
+router.get ('/sequence/full',         async (req, res) => { try { res.json({ ok: true, ...(await localCmd(req, 'sequencegetfull',     {},       5000) || {}) }); } catch (e) { wErr(res, e); } });
+router.post('/sequence/event/add',    async (req, res) => { try { res.json({ ok: true, ...(await localCmd(req, 'sequenceaddevent',    req.body, 5000) || {}) }); } catch (e) { wErr(res, e); } });
+router.post('/sequence/event/remove', async (req, res) => { try { res.json({ ok: true, ...(await localCmd(req, 'sequenceremoveevent', req.body, 5000) || {}) }); } catch (e) { wErr(res, e); } });
+router.post('/sequence/events/clear', async (req, res) => { try { res.json({ ok: true, ...(await localCmd(req, 'sequenceclearevents', {},       5000) || {}) }); } catch (e) { wErr(res, e); } });
+
 module.exports = router;

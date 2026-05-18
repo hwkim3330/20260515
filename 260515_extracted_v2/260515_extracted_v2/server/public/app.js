@@ -326,8 +326,11 @@ function frameMatchesFilter(packet, filter) {
 
 function buildPacketRow(packet) {
   const decoded = packet.decoded || {};
-  const src = decoded.ipv4?.src || decoded.arp?.senderIp || decoded.ethernet?.srcMac || '-';
-  const dst = decoded.ipv4?.dst || decoded.arp?.targetIp || decoded.ethernet?.dstMac || '-';
+  const eth = decoded.ethernet || decoded.eth || {};
+  const srcMac = eth.srcMac || eth.src || '-';
+  const dstMac = eth.dstMac || eth.dst || '-';
+  const srcIp = decoded.ipv4?.src || decoded.arp?.senderIp || decoded.ipv6?.src || '-';
+  const dstIp = decoded.ipv4?.dst || decoded.arp?.targetIp || decoded.ipv6?.dst || '-';
   const t = packet.timestamp;
   const d = new Date(t * 1000);
   const ms = String(d.getMilliseconds()).padStart(3, '0');
@@ -339,7 +342,7 @@ function buildPacketRow(packet) {
   tr.className = rowProtoClass(decoded);
   // No per-row listener — tbody-level delegation handles clicks.
   const iface = packet._iface || '';
-  tr.innerHTML = `<td class="colNum">${idx + 1}</td><td class="colTime">${tStr}</td><td class="colIface">${iface}</td><td class="colSrc">${src}</td><td class="colDst">${dst}</td><td class="colProto">${proto}</td><td class="colLen">${packet.length}</td><td>${packetInfo(decoded)}</td>`;
+  tr.innerHTML = `<td class="colNum">${idx + 1}</td><td class="colTime">${tStr}</td><td class="colIface">${iface}</td><td class="colSrcMac">${srcMac}</td><td class="colDstMac">${dstMac}</td><td class="colSrc">${srcIp}</td><td class="colDst">${dstIp}</td><td class="colProto">${proto}</td><td class="colLen">${packet.length}</td><td>${packetInfo(decoded)}</td>`;
   return tr;
 }
 
@@ -562,6 +565,26 @@ async function startCaptureStream() {
   capture.filter = $('captureDisplayFilter').value.trim();
   capture.readers = [];
   capture.abort = new AbortController();
+
+  // Show BPF badge if any capture filter is active
+  const _srcMac = $('captureSrcMac')?.value.trim() || '';
+  const _dstMac = $('captureDstMac')?.value.trim() || '';
+  const _etherType = $('captureEtherType')?.value.trim() || '';
+  const bpfParts = [];
+  if (_srcMac) bpfParts.push(`ether src ${_srcMac.toLowerCase()}`);
+  if (_dstMac) bpfParts.push(`ether dst ${_dstMac.toLowerCase()}`);
+  if (_etherType) bpfParts.push(`ether proto ${_etherType}`);
+  const activeBpf = bpfParts.join(' and ');
+  const badge = $('captureBpfBadge');
+  const bpfText = $('captureBpfText');
+  if (badge && bpfText) {
+    if (activeBpf) {
+      bpfText.textContent = activeBpf;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
   const statTimer = setInterval(() => {
     const now = performance.now();
     const dt = (now - capture.lastWindow.t) / 1000;
@@ -598,6 +621,8 @@ function finishCaptureStream(label) {
   $('captureStop').disabled = true;
   $('capStatState').classList.remove('running');
   $('capStatState').textContent = label || 'idle';
+  // Hide BPF badge when capture stops
+  $('captureBpfBadge')?.classList.add('hidden');
   refreshCaptureStats();
 }
 
@@ -1435,59 +1460,107 @@ function ifaceIp(iface) {
   return iface?.ipv4?.find((addr) => addr.local && !addr.local.includes(':'))?.local || '';
 }
 
+// Live port link status (null=unknown, true=up, false=down) — updated by portMonitorPoll
+const portLinkStatus = Array(6).fill(null);
+
 function renderControlTopology() {
-  const svg = $('controlTopologySvg');
-  if (!svg) return;
+  const svgEl = $('controlTopologySvg');
+  if (!svgEl) return;
   let pairs = [];
-  try {
-    pairs = selectedControlPairs();
-  } catch {
-    pairs = [];
-  }
+  try { pairs = selectedControlPairs(); } catch { pairs = []; }
   const senderNode = state.nodes.sender;
   const receiverNode = state.nodes.receiver;
   const summary = $('controlTopologySummary');
-  if (summary) summary.textContent = pairs.length ? `${pairs.length} selected link(s)` : 'select sender/receiver ports';
+  if (summary) summary.textContent = pairs.length ? `${pairs.length} link(s) — 6-port switch` : 'select sender/receiver ports';
+
+  // d3-powered topology
+  if (typeof d3 === 'undefined') { svgEl.innerHTML = `<text x="460" y="132" text-anchor="middle" class="topoSubtext">d3.js loading...</text>`; return; }
+
+  const W = 980, H = 310;
+  svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  const svg = d3.select(svgEl);
+  svg.selectAll('*').remove();
+
+  // ── Switch box (centre) ──────────────────────────────────────────────────
+  const SW = { x: W / 2 - 110, y: H / 2 - 95, w: 220, h: 190, rx: 16 };
+  svg.append('rect').attr('class', 'topoSwitch')
+    .attr('x', SW.x).attr('y', SW.y).attr('width', SW.w).attr('height', SW.h).attr('rx', SW.rx);
+  svg.append('text').attr('class', 'topoSwitchText').attr('text-anchor', 'middle')
+    .attr('x', SW.x + SW.w / 2).attr('y', SW.y + 22).text('DUT SWITCH');
+
+  // ── 6 switch ports (2 rows × 3 cols) ────────────────────────────────────
+  const PW = 52, PH = 34, PGAP = 7;
+  const pxStart = SW.x + (SW.w - 3 * PW - 2 * PGAP) / 2;
+  const rowY = [SW.y + 34, SW.y + SW.h - PH - 14];
+  const swPortCenters = [];
+  for (let row = 0; row < 2; row++) {
+    for (let col = 0; col < 3; col++) {
+      const p = row * 3 + col;
+      const px = pxStart + col * (PW + PGAP);
+      const py = rowY[row];
+      swPortCenters[p] = { cx: px + PW / 2, cy: py + PH / 2 };
+      const up = portLinkStatus[p];
+      const dotColor = up === true ? '#22c55e' : up === false ? '#ef4444' : '#888';
+      const isActive = pairs.some((_, i) => i % 6 === p);
+      svg.append('rect').attr('x', px).attr('y', py).attr('width', PW).attr('height', PH).attr('rx', 6)
+        .attr('fill', isActive ? '#0b5cab' : 'rgba(200,215,230,.8)')
+        .attr('stroke', dotColor).attr('stroke-width', 2);
+      svg.append('circle')
+        .attr('cx', px + PW - 8).attr('cy', py + 8).attr('r', 4).attr('fill', dotColor);
+      svg.append('text').attr('text-anchor', 'middle').attr('font-size', '11px').attr('font-weight', '700')
+        .attr('x', px + PW / 2).attr('y', py + PH / 2 + 5)
+        .attr('fill', isActive ? '#fff' : '#4a6070').text(`P${p}`);
+    }
+  }
+
   if (!pairs.length) {
-    svg.innerHTML = `
-      <text x="460" y="132" text-anchor="middle" class="topoSubtext">Probe peer and select interface pairs</text>
-    `;
+    svg.append('text').attr('class', 'topoSubtext').attr('text-anchor', 'middle')
+      .attr('x', W / 2).attr('y', H - 18).text('Probe peer and select interface pairs');
     return;
   }
-  const laneYs = pairs.map((_, index) => 78 + index * Math.min(64, 132 / Math.max(1, pairs.length - 1 || 1)));
-  const port = (x, y, label, ip, cls = '') => `
-    <rect class="topoPort ${cls}" x="${x - 72}" y="${y - 22}" width="144" height="44" rx="12"></rect>
-    <text x="${x}" y="${y - 3}" text-anchor="middle" class="topoText">${escapeHtml(label)}</text>
-    <text x="${x}" y="${y + 14}" text-anchor="middle" class="topoSubtext">${escapeHtml(ip || '-')}</text>
-  `;
-  const links = pairs.map((pair, index) => {
-    const y = laneYs[index];
-    const cls = index % 2 ? 'alt' : '';
-    return `
-      <path data-topo-index="${index}" class="topoLink ${cls}" d="M250 ${y} C330 ${y}, 330 130, 410 130"></path>
-      <path data-topo-index="${index}" class="topoLink ${cls}" d="M510 130 C590 130, 590 ${y}, 670 ${y}"></path>
-    `;
-  }).join('');
-  const senderPorts = pairs.map((pair, index) => {
-    const iface = ifaceByName(senderNode, pair.senderIf);
-    return port(170, laneYs[index], pair.senderIf, ifaceIp(iface));
-  }).join('');
-  const receiverPorts = pairs.map((pair, index) => {
-    const iface = ifaceByName(receiverNode, pair.receiverIf);
-    return port(750, laneYs[index], pair.receiverIf, ifaceIp(iface), 'peer');
-  }).join('');
-  svg.innerHTML = `
-    <rect class="topoNode" x="28" y="34" width="260" height="190" rx="22"></rect>
-    <rect class="topoNode" x="632" y="34" width="260" height="190" rx="22"></rect>
-    <text x="158" y="58" text-anchor="middle" class="topoSubtext">THIS PC / SENDER</text>
-    <text x="762" y="58" text-anchor="middle" class="topoSubtext">PEER PC / RECEIVER</text>
-    ${links}
-    <rect class="topoSwitch" x="410" y="92" width="100" height="76" rx="18"></rect>
-    <text x="460" y="125" text-anchor="middle" class="topoSwitchText">DUT</text>
-    <text x="460" y="145" text-anchor="middle" class="topoSwitchText">SWITCH</text>
-    ${senderPorts}
-    ${receiverPorts}
-  `;
+
+  // ── PC node boxes ────────────────────────────────────────────────────────
+  const PCW = 190, PCH = Math.max(130, pairs.length * 54 + 36), pcY = H / 2 - PCH / 2;
+  const sX = 14, rX = W - 14 - PCW;
+  svg.append('rect').attr('class', 'topoNode').attr('x', sX).attr('y', pcY).attr('width', PCW).attr('height', PCH).attr('rx', 20);
+  svg.append('rect').attr('class', 'topoNode').attr('x', rX).attr('y', pcY).attr('width', PCW).attr('height', PCH).attr('rx', 20);
+  svg.append('text').attr('class', 'topoSubtext').attr('text-anchor', 'middle').attr('x', sX + PCW / 2).attr('y', pcY + 22).text('THIS PC / SENDER');
+  svg.append('text').attr('class', 'topoSubtext').attr('text-anchor', 'middle').attr('x', rX + PCW / 2).attr('y', pcY + 22).text('PEER PC / RECEIVER');
+
+  // ── Per-pair: port boxes + connection paths ──────────────────────────────
+  pairs.forEach((pair, i) => {
+    const portIdx = i % 6;
+    const sp = swPortCenters[portIdx];
+    const laneY = Math.max(pcY + 34, Math.min(pcY + PCH - 34, pcY + 36 + i * 54));
+    const cls = i % 2 ? 'alt' : '';
+    const sIface = ifaceByName(senderNode, pair.senderIf);
+    const rIface = ifaceByName(receiverNode, pair.receiverIf);
+
+    // Sender port
+    svg.append('rect').attr('class', `topoPort ${cls}`)
+      .attr('x', sX + 12).attr('y', laneY - 18).attr('width', PCW - 24).attr('height', 36).attr('rx', 10);
+    svg.append('text').attr('class', 'topoText').attr('text-anchor', 'middle')
+      .attr('x', sX + PCW / 2).attr('y', laneY - 2).text(escapeHtml(pair.senderIf));
+    svg.append('text').attr('class', 'topoSubtext').attr('text-anchor', 'middle')
+      .attr('x', sX + PCW / 2).attr('y', laneY + 14).text(ifaceIp(sIface) || '-');
+
+    // Link: sender → switch
+    svg.append('path').attr('class', `topoLink ${cls}`)
+      .attr('d', `M${sX + PCW - 12},${laneY} C${SW.x - 60},${laneY},${SW.x - 10},${sp.cy},${SW.x},${sp.cy}`);
+
+    // Receiver port
+    svg.append('rect').attr('class', `topoPort peer ${cls}`)
+      .attr('x', rX + 12).attr('y', laneY - 18).attr('width', PCW - 24).attr('height', 36).attr('rx', 10);
+    svg.append('text').attr('class', 'topoText').attr('text-anchor', 'middle')
+      .attr('x', rX + PCW / 2).attr('y', laneY - 2).text(escapeHtml(pair.receiverIf));
+    svg.append('text').attr('class', 'topoSubtext').attr('text-anchor', 'middle')
+      .attr('x', rX + PCW / 2).attr('y', laneY + 14).text(ifaceIp(rIface) || '-');
+
+    // Link: switch → receiver
+    svg.append('path').attr('class', `topoLink ${cls}`)
+      .attr('d', `M${SW.x + SW.w},${sp.cy} C${SW.x + SW.w + 10},${sp.cy},${rX + 60},${laneY},${rX + 12},${laneY}`);
+  });
 }
 
 function initControlRunBoard(title, pairs) {
@@ -1987,18 +2060,47 @@ document.querySelectorAll('[data-view]').forEach((button) => {
     document.querySelectorAll('.roleView').forEach((view) => view.classList.remove('active'));
     button.classList.add('active');
     $(button.dataset.view).classList.add('active');
-    if (button.dataset.view === 'controlView') renderPairCard();
-    if (button.dataset.view === 'serialView' && !state.serial.ports.length) refreshTtyList().catch(() => {});
-    document.body.classList.toggle('captureMode', button.dataset.view === 'captureView');
-    document.body.classList.toggle('serialMode', button.dataset.view === 'serialView');
-    document.body.classList.toggle('controlMode', button.dataset.view === 'controlView');
-    document.body.classList.toggle('senderMode', button.dataset.view === 'senderView');
-    // When switching tabs, mirror the active tab's picker into the hidden
-    // <select id=interfaceSelect> so legacy callers (send/capture handlers,
-    // peer-locking code, localStorage) see the correct selection.
+    const v = button.dataset.view;
+    document.body.classList.toggle('captureMode', v === 'captureView');
+    document.body.classList.toggle('senderMode',  v === 'senderView');
+    if (v !== 'hyperTerminalView') {
+      document.body.classList.remove('serialMode', 'controlMode');
+    } else {
+      const activeHt = document.querySelector('.htSubTab.active');
+      document.body.classList.toggle('serialMode',  activeHt?.dataset.htview === 'serialView');
+      document.body.classList.toggle('controlMode', activeHt?.dataset.htview === 'controlView');
+    }
     mirrorIfaceSelectionToHiddenSelect();
   });
 });
+
+// HyperTerminal sub-tab handler
+document.querySelectorAll('[data-htview]').forEach((button) => {
+  button.addEventListener('click', () => {
+    document.querySelectorAll('[data-htview]').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.htSubView').forEach((v) => v.classList.remove('active'));
+    button.classList.add('active');
+    $(button.dataset.htview).classList.add('active');
+    const hv = button.dataset.htview;
+    document.body.classList.toggle('serialMode',  hv === 'serialView');
+    document.body.classList.toggle('controlMode', hv === 'controlView');
+    if (hv === 'serialView' && !state.serial.ports.length) refreshTtyList().catch(() => {});
+    if (hv === 'registerView') regLoadStatus().catch(() => {});
+    if (hv === 'controlView') renderPairCard();
+    mirrorIfaceSelectionToHiddenSelect();
+  });
+});
+
+// Navigate to a view by ID — handles both top-level and HyperTerminal sub-views
+function showView(viewId) {
+  const HT_SUBVIEWS = ['serialView', 'registerView', 'fdbView', 'autoView', 'controlView'];
+  if (HT_SUBVIEWS.includes(viewId)) {
+    document.querySelector('[data-view="hyperTerminalView"]')?.click();
+    document.querySelector(`[data-htview="${viewId}"]`)?.click();
+  } else {
+    document.querySelector(`[data-view="${viewId}"]`)?.click();
+  }
+}
 
 // ----------- Serial / TTY console -----------
 state.serial = { ports: [], sessionId: null, reader: null, abort: null, rxCount: 0, txCount: 0 };
@@ -2028,11 +2130,14 @@ function hexToBytes(hex) {
 function appendSerialLog(text, cls) {
   const log = $('serialLog');
   if (!log) return;
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
   const span = document.createElement('span');
   if (cls) span.className = cls;
   span.textContent = text;
   log.appendChild(span);
-  log.scrollTop = log.scrollHeight;
+  if (atBottom) log.scrollTop = log.scrollHeight;
+  // Trim buffer to 4000 child nodes to avoid memory growth
+  while (log.childNodes.length > 4000) log.removeChild(log.firstChild);
 }
 
 function renderRxBytes(bytes) {
@@ -2194,7 +2299,8 @@ $('serialBreak')?.addEventListener('click', async () => {
   try { await api('/api/tty/control', { method:'POST', body: JSON.stringify({ sessionId: state.serial.sessionId, cmd: 'break' }) }); appendSerialLog('-- break --\n', 'info'); } catch {}
 });
 $('serialInput')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); serialSendInput().catch(() => {}); }
+  if (e.key === 'Enter')  { e.preventDefault(); serialSendInput().catch(() => {}); }
+  if (e.key === 'Escape') { e.preventDefault(); e.target.value = ''; }
 });
 
 $('refreshInterfaces').addEventListener('click', () => loadInterfaces().catch((err) => {
@@ -2966,6 +3072,7 @@ async function runBenchmark() {
     setActionStatus('statusBench', okFlag ? 'ok' : 'fail', `${pass}/${results.length} pairs · ${totalRx}/${totalTx}`);
     if (okFlag) prog.finish(); else prog.fail();
     setStatus(`Benchmark done: ${pass}/${results.length} pair(s), ${totalRx}/${totalTx} rx`, !okFlag);
+    renderBenchChart(results);
     if (okFlag) window.open('/reports/benchmark-latest.html', '_blank');
     else {
       toast(`One or more benchmark pairs received 0 packets. Check cable/link, selected Sender/Receiver NIC pairing, and peer agent reachability.\n\nThe benchmark always uses UDP+IPv4 internally regardless of the Sender-tab profile.`);
@@ -3028,6 +3135,7 @@ async function runRfc2544() {
     setActionStatus('statusRfc', 'ok', `${results.length} pair(s) · last avg ${avgUtil}%`);
     prog.finish();
     setStatus(`RFC 2544 done: ${results.length} pair(s), last ${sizes} sizes, avg ${avgUtil}% utilization`);
+    renderRfcChart(last.results);
     window.open('/reports/rfc2544-latest.html', '_blank');
   } catch (err) {
     setActionStatus('statusRfc', 'fail', 'fail');
@@ -3090,6 +3198,7 @@ async function runSweep() {
     setActionStatus('statusSweep', 'ok', `${results.length} pair(s) · ${sizes} sizes`);
     prog.finish();
     setStatus(`Sweep done: ${results.length} pair(s), ${sizes} sizes each`);
+    renderSweepChart(lastSweep.results);
     window.open('/reports/sweep-latest.html', '_blank');
   } catch (err) {
     setActionStatus('statusSweep', 'fail', 'fail');
@@ -3540,14 +3649,6 @@ $('receiverNodeInterface').addEventListener('change', () => {
   }
 });
 
-// Switch tab early based on URL hash, before any async loads
-(() => {
-  const hash = location.hash.replace('#', '');
-  const target = { capture: 'captureView', control: 'controlView', sender: 'senderView', serial: 'serialView' }[hash];
-  if (!target) return;
-  const btn = document.querySelector(`[data-view="${target}"]`);
-  if (btn) btn.click();
-})();
 // ?autoStart=1 — used for headless verification of the capture pipeline
 const _autoStart = new URLSearchParams(location.search).get('autoStart') === '1';
 // Decorate the topbar version chip
@@ -3586,8 +3687,8 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === '?') { e.preventDefault(); toggleHelp(); return; }
-  const tabMap = { '1': 'senderView', '2': 'captureView', '3': 'controlView', '4': 'serialView', '5': 'registerView', '6': 'fdbView', '7': 'autoView' };
-  if (tabMap[e.key]) { e.preventDefault(); document.querySelector(`[data-view="${tabMap[e.key]}"]`)?.click(); return; }
+  const tabMap = { '1': 'senderView', '2': 'labView', '3': 'captureView', '4': 'hyperTerminalView', '5': 'serialView', '6': 'registerView', '7': 'fdbView', '8': 'autoView', '9': 'controlView' };
+  if (tabMap[e.key]) { e.preventDefault(); showView(tabMap[e.key]); return; }
   if (document.getElementById('captureView')?.classList.contains('active')) {
     if (e.key.toLowerCase() === 's') { e.preventDefault(); ($('captureStart').disabled ? $('captureStop') : $('captureStart'))?.click(); return; }
     if (e.key.toLowerCase() === 'c') { e.preventDefault(); $('captureClear')?.click(); return; }
@@ -3643,10 +3744,8 @@ if (_autoStart) {
 // Honour URL hash like #capture / #control / #sender to jump to a tab on load
 (() => {
   const hash = location.hash.replace('#', '');
-  const target = { capture: 'captureView', control: 'controlView', sender: 'senderView', register: 'registerView', fdb: 'fdbView', auto: 'autoView' }[hash];
-  if (!target) return;
-  const btn = document.querySelector(`[data-view="${target}"]`);
-  if (btn) btn.click();
+  const target = { capture: 'captureView', sender: 'senderView', lab: 'labView', hyper: 'hyperTerminalView', hyperterminal: 'hyperTerminalView', serial: 'serialView', register: 'registerView', fdb: 'fdbView', auto: 'autoView', control: 'controlView' }[hash.toLowerCase()];
+  if (target) showView(target);
 })();
 
 // ── Register Tab ──────────────────────────────────────────────────────────────
@@ -3670,6 +3769,110 @@ function regParseInput(val) {
   return s;
 }
 
+// ── System Control helpers ─────────────────────────────────────────────────────
+// Offset is relative to base address. The server-side register API already applies
+// the base address stored in the C# app, so we send the offset raw.  But the web UI
+// adds its own "Base Address" field so users can cross-check / override.  The field
+// is informational only (the server owns the real base); we use it just for display.
+
+function sysCtrlSetStatus(text, kind) {
+  const el = document.getElementById('regSysCtrlStatus');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'sysCtrlStatus' + (kind === 'ok' ? ' sysCtrlOk' : kind === 'err' ? ' sysCtrlErr' : kind === 'warn' ? ' sysCtrlWarn' : '');
+}
+
+function parseBcdByte(b) {
+  return ((b >> 4) & 0xF) * 10 + (b & 0xF);
+}
+
+function parseVersionWord(v) {
+  const major = (v >>> 24) & 0xFF;
+  const year  = (v >>> 16) & 0xFF;
+  const month = (v >>> 12) & 0xF;
+  const day   = (v >>>  4) & 0xFF;
+  const minor =  v         & 0xF;
+  const majorName = major === 0x52 ? 'TSGW' : `0x${major.toString(16).toUpperCase().padStart(2,'0')}`;
+  const yearVal = parseBcdByte(year);
+  const dayVal  = parseBcdByte(day);
+  const monthNames = ['','1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
+  const monthStr = monthNames[month] || `${month}월`;
+  return `${majorName}  20${String(yearVal).padStart(2,'0')}년 ${monthStr} ${String(dayVal).padStart(2,'0')}일  v${minor}`;
+}
+
+async function sysCtrlReadVersion() {
+  const d = await api('/api/register/read', { method: 'POST', body: JSON.stringify({ offset: '0x000' }) });
+  const raw = parseInt(d.value, 16);
+  const verEl = document.getElementById('regVersionDisplay');
+  if (verEl) verEl.textContent = parseVersionWord(raw) + `  (raw: ${d.value})`;
+}
+
+async function sysCtrlReadEnable() {
+  const d = await api('/api/register/read', { method: 'POST', body: JSON.stringify({ offset: '0x008' }) });
+  const v = parseInt(d.value, 16);
+  const ports = (v >>> 8) & 0xFF;
+  const checks = ['regP0','regP1','regP2','regP3','regP4','regP5','regP6','regP7'];
+  checks.forEach((id, i) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = (ports & (1 << i)) !== 0;
+  });
+  const tsgw = document.getElementById('regTsgwEnable');
+  if (tsgw) tsgw.checked = (v & 0x1) !== 0;
+}
+
+async function sysCtrlReadHostIf() {
+  const d = await api('/api/register/read', { method: 'POST', body: JSON.stringify({ offset: '0x00C' }) });
+  const v = parseInt(d.value, 16);
+  const wrEl = document.getElementById('regAhbWrWait');
+  const rdEl = document.getElementById('regAhbRdWait');
+  if (wrEl) wrEl.value = v & 0xF;
+  if (rdEl) rdEl.value = (v >>> 4) & 0xF;
+}
+
+document.getElementById('regReadAllBtn')?.addEventListener('click', async () => {
+  sysCtrlSetStatus('읽는 중...', '');
+  try {
+    await sysCtrlReadVersion();
+    await sysCtrlReadEnable();
+    await sysCtrlReadHostIf();
+    sysCtrlSetStatus('읽기 완료', 'ok');
+  } catch (e) { sysCtrlSetStatus(`오류: ${e.message}`, 'err'); }
+});
+
+document.getElementById('regLoadDefaultsBtn')?.addEventListener('click', async () => {
+  sysCtrlSetStatus('기본값 로드 중...', '');
+  try {
+    await api('/api/register/write', { method: 'POST', body: JSON.stringify({ offset: '0x004', value: '0x1' }) });
+    sysCtrlSetStatus('기본값 로드 완료', 'ok');
+  } catch (e) { sysCtrlSetStatus(`오류: ${e.message}`, 'err'); }
+});
+
+document.getElementById('regApplyEnableBtn')?.addEventListener('click', async () => {
+  sysCtrlSetStatus('Enable 설정 적용 중...', '');
+  try {
+    const checks = ['regP0','regP1','regP2','regP3','regP4','regP5','regP6','regP7'];
+    let ports = 0;
+    checks.forEach((id, i) => {
+      if (document.getElementById(id)?.checked) ports |= (1 << i);
+    });
+    const tsgw = document.getElementById('regTsgwEnable')?.checked ? 1 : 0;
+    const v = tsgw | (ports << 8);
+    await api('/api/register/write', { method: 'POST', body: JSON.stringify({ offset: '0x008', value: `0x${v.toString(16).toUpperCase()}` }) });
+    sysCtrlSetStatus(`Enable 적용 완료 (0x${v.toString(16).toUpperCase().padStart(8,'0')})`, 'ok');
+  } catch (e) { sysCtrlSetStatus(`오류: ${e.message}`, 'err'); }
+});
+
+document.getElementById('regApplyAhbBtn')?.addEventListener('click', async () => {
+  sysCtrlSetStatus('AHB 설정 적용 중...', '');
+  try {
+    const wr = Math.max(0, Math.min(15, parseInt(document.getElementById('regAhbWrWait')?.value || '15', 10)));
+    const rd = Math.max(0, Math.min(15, parseInt(document.getElementById('regAhbRdWait')?.value || '15', 10)));
+    const v = (rd << 4) | wr;
+    await api('/api/register/write', { method: 'POST', body: JSON.stringify({ offset: '0x00C', value: `0x${v.toString(16).toUpperCase()}` }) });
+    sysCtrlSetStatus(`AHB 적용 완료 (WR=${wr}, RD=${rd})`, 'ok');
+  } catch (e) { sysCtrlSetStatus(`오류: ${e.message}`, 'err'); }
+});
+
 document.getElementById('regReadBtn')?.addEventListener('click', async () => {
   const out = document.getElementById('regReadResult');
   if (!out) return;
@@ -3679,7 +3882,8 @@ document.getElementById('regReadBtn')?.addEventListener('click', async () => {
   out.textContent = '읽는 중...'; out.style.color = 'var(--muted)';
   try {
     const d = await api('/api/register/read', { method: 'POST', body: JSON.stringify({ offset }) });
-    out.textContent = `offset : ${d.offset}\nvalue  : ${d.value}\n         (dec: ${d.valueDec})`;
+    const dec = d.valueDec ?? d.valueNum ?? '';
+    out.textContent = `offset : ${d.offset}\nvalue  : ${d.value}\n         (dec: ${dec})`;
     out.style.color = 'var(--accent)';
   } catch (e) { out.textContent = `오류: ${e.message}`; out.style.color = '#b91c1c'; }
 });
@@ -3700,10 +3904,183 @@ document.getElementById('regWriteBtn')?.addEventListener('click', async () => {
   } catch (e) { out.textContent = `오류: ${e.message}`; out.style.color = '#b91c1c'; }
 });
 
-document.querySelector('[data-view="registerView"]')?.addEventListener('click', () => regLoadStatus());
+document.querySelector('[data-htview="registerView"]')?.addEventListener('click', () => regLoadStatus().catch(() => {}));
 
 // ── FDB Tab ───────────────────────────────────────────────────────────────────
 const MAC_RE = /^([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}$/;
+
+// FDB Control helpers
+const FDB_OFF_VERSION    = '0xA00';
+const FDB_OFF_FDB_LOAD   = '0xA04';
+const FDB_OFF_ENABLE     = '0xA0C';
+const FDB_OFF_AGE_PERIOD = '0xA10';
+const FDB_OFF_AGING_THR  = '0xA14';
+const FDB_OFF_MCU_MAC0   = '0xA18';
+const FDB_OFF_MCU_MAC1   = '0xA1C';
+const FDB_OFF_MCU_VLAN   = '0xA20';
+const FDB_OFF_MCU_BUCKET = '0xA28';
+const FDB_OFF_MCU_CMD    = '0xA2C';
+const FDB_OFF_FDB_STATUS = '0xA40';
+const FDB_OFF_CMD_STATUS = '0xA44';
+const FDB_OFF_RD_BUCKET  = '0xA48';
+const FDB_OFF_RD_PORT    = '0xA4C';
+const FDB_OFF_RD_FLAGS   = '0xA50';
+const FDB_OFF_RD_MAC0    = '0xA54';
+const FDB_OFF_RD_MAC1    = '0xA58';
+const FDB_OFF_RD_MAC2    = '0xA5C';
+
+function fdbCtrlSetStatus(text, kind) {
+  const el = document.getElementById('fdbCtrlStatus');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'sysCtrlStatus' + (kind === 'ok' ? ' sysCtrlOk' : kind === 'err' ? ' sysCtrlErr' : kind === 'warn' ? ' sysCtrlWarn' : '');
+}
+
+async function fdbRegRead(offset) {
+  const d = await api('/api/register/read', { method: 'POST', body: JSON.stringify({ offset }) });
+  return parseInt(d.value, 16);
+}
+
+async function fdbRegWrite(offset, value) {
+  await api('/api/register/write', { method: 'POST', body: JSON.stringify({ offset, value: `0x${value.toString(16).toUpperCase().padStart(8,'0')}` }) });
+}
+
+async function fdbPollStatus(bitMask, statusOffset, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const v = await fdbRegRead(statusOffset);
+    if ((v & bitMask) !== 0) return;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  throw new Error(`폴링 타임아웃 (mask=0x${bitMask.toString(16)}, offset=${statusOffset})`);
+}
+
+function parseMacToWords(mac) {
+  const bytes = mac.split(':').map(s => parseInt(s, 16));
+  // bytes[0]=MSB ... bytes[5]=LSB
+  // MAC0 = bytes[2..5] (little-endian layout matching C# service)
+  const mac0 = (bytes[2] << 24) | (bytes[3] << 16) | (bytes[4] << 8) | bytes[5];
+  const mac1 = (bytes[0] << 8)  |  bytes[1];
+  return { mac0: mac0 >>> 0, mac1: mac1 >>> 0 };
+}
+
+function formatMacFromWords(hi16, mid16, lo16) {
+  const b = (n, shift, mask) => ((n >>> shift) & mask).toString(16).padStart(2, '0').toUpperCase();
+  return `${b(hi16,8,0xFF)}:${b(hi16,0,0xFF)}:${b(mid16,8,0xFF)}:${b(mid16,0,0xFF)}:${b(lo16,8,0xFF)}:${b(lo16,0,0xFF)}`;
+}
+
+document.getElementById('fdbReadStatusBtn')?.addEventListener('click', async () => {
+  fdbCtrlSetStatus('읽는 중...', '');
+  try {
+    const ver = await fdbRegRead(FDB_OFF_VERSION);
+    const verEl = document.getElementById('fdbVersionDisplay');
+    if (verEl) verEl.textContent = `Version: 0x${ver.toString(16).toUpperCase().padStart(8,'0')}`;
+
+    const en = await fdbRegRead(FDB_OFF_ENABLE);
+    const ageScan  = document.getElementById('fdbAgeScanEnable');
+    const learning = document.getElementById('fdbLearningEnable');
+    const lookup   = document.getElementById('fdbLookupEnable');
+    if (ageScan)  ageScan.checked  = (en & (1 << 4)) !== 0;
+    if (learning) learning.checked = (en & (1 << 1)) !== 0;
+    if (lookup)   lookup.checked   = (en & (1 << 0)) !== 0;
+
+    const agePeriod = await fdbRegRead(FDB_OFF_AGE_PERIOD);
+    const agingThr  = await fdbRegRead(FDB_OFF_AGING_THR);
+    const apEl = document.getElementById('fdbAgePeriodNs');
+    const atEl = document.getElementById('fdbAgingThr');
+    if (apEl) apEl.value = agePeriod;
+    if (atEl) atEl.value = agingThr;
+
+    fdbCtrlSetStatus('읽기 완료', 'ok');
+  } catch (e) { fdbCtrlSetStatus(`오류: ${e.message}`, 'err'); }
+});
+
+document.getElementById('fdbLoadDefaultsBtn')?.addEventListener('click', async () => {
+  fdbCtrlSetStatus('Default Load 중...', '');
+  try {
+    await fdbRegWrite(FDB_OFF_FDB_LOAD, 1);
+    fdbCtrlSetStatus('Default Load 완료', 'ok');
+  } catch (e) { fdbCtrlSetStatus(`오류: ${e.message}`, 'err'); }
+});
+
+document.getElementById('fdbApplyEnableBtn')?.addEventListener('click', async () => {
+  fdbCtrlSetStatus('Enable 적용 중...', '');
+  try {
+    let en = 0;
+    if (document.getElementById('fdbAgeScanEnable')?.checked)  en |= (1 << 4);
+    if (document.getElementById('fdbLearningEnable')?.checked) en |= (1 << 1);
+    if (document.getElementById('fdbLookupEnable')?.checked)   en |= (1 << 0);
+    await fdbRegWrite(FDB_OFF_ENABLE, en);
+    fdbCtrlSetStatus(`ENABLE 적용 완료 (0x${en.toString(16).toUpperCase()})`, 'ok');
+  } catch (e) { fdbCtrlSetStatus(`오류: ${e.message}`, 'err'); }
+});
+
+document.getElementById('fdbApplyAgingBtn')?.addEventListener('click', async () => {
+  fdbCtrlSetStatus('Aging 설정 적용 중...', '');
+  try {
+    const ap = parseInt(document.getElementById('fdbAgePeriodNs')?.value || '0', 10);
+    const at = parseInt(document.getElementById('fdbAgingThr')?.value    || '0', 10);
+    await fdbRegWrite(FDB_OFF_AGE_PERIOD, ap);
+    await fdbRegWrite(FDB_OFF_AGING_THR,  at);
+    fdbCtrlSetStatus(`Aging 적용 완료 (Period=${ap}ns, Thr=${at}×100ms)`, 'ok');
+  } catch (e) { fdbCtrlSetStatus(`오류: ${e.message}`, 'err'); }
+});
+
+// FDB Bucket Read (CMD=0x13)
+document.getElementById('fdbBucketReadBtn')?.addEventListener('click', async () => {
+  const out = document.getElementById('fdbBucketResult');
+  if (!out) return;
+  out.textContent = '읽는 중...'; out.style.color = 'var(--muted)';
+  try {
+    const bucketStr = (document.getElementById('fdbBucketNum')?.value || '0').trim();
+    const slotStr   = (document.getElementById('fdbSlotBitmap')?.value || '0x1').trim();
+    const bucket = parseInt(bucketStr, 10);
+    const slot   = slotStr.startsWith('0x') || slotStr.startsWith('0X')
+                     ? parseInt(slotStr, 16) : parseInt(slotStr, 10);
+    if (bucket < 0 || bucket > 1023) throw new Error('Bucket은 0~1023 범위입니다');
+    if (slot < 1 || slot > 0xF)     throw new Error('Slot bitmap은 0x1~0xF 범위입니다');
+
+    const bucketReg = ((slot & 0xF) << 16) | (bucket & 0x3FF);
+    await fdbRegWrite(FDB_OFF_MCU_BUCKET, bucketReg);
+    await fdbRegWrite(FDB_OFF_MCU_CMD,    0x13);      // CMD_READ_BUCKET
+
+    // Poll CMD_STATUS [0] = RD-MAC valid
+    await fdbPollStatus(0x1, FDB_OFF_CMD_STATUS, 1000);
+
+    const flags  = await fdbRegRead(FDB_OFF_RD_FLAGS);
+    const valid  = (flags & 0x8000) !== 0;
+    const isStatic = (flags & 0x4000) !== 0;
+    const timestamp = flags & 0x3FFF;
+
+    if (!valid) {
+      out.textContent = `Bucket ${bucket} / Slot 0x${slot.toString(16).toUpperCase()}: 슬롯 비어있음 (Valid 비트 = 0)`;
+      out.style.color = 'var(--warn)';
+      return;
+    }
+
+    const mac0    = await fdbRegRead(FDB_OFF_RD_MAC0);
+    const mac1    = await fdbRegRead(FDB_OFF_RD_MAC1);
+    const mac2    = await fdbRegRead(FDB_OFF_RD_MAC2);
+    const rdPort  = await fdbRegRead(FDB_OFF_RD_PORT);
+    const rdBkt   = await fdbRegRead(FDB_OFF_RD_BUCKET);
+
+    const macStr  = formatMacFromWords(mac2 & 0xFFFF, mac1 & 0xFFFF, mac0 & 0xFFFF);
+    const port    = rdPort & 0x1FF;
+    const rdBucket = rdBkt & 0x3FF;
+    const rdSlot  = (rdBkt >>> 12) & 0xF;
+
+    out.textContent = [
+      `Bucket    : ${rdBucket}`,
+      `Slot      : 0x${rdSlot.toString(16).toUpperCase()}`,
+      `MAC       : ${macStr}`,
+      `Port      : ${port}`,
+      `Type      : ${isStatic ? 'Static' : 'Dynamic'}`,
+      `Timestamp : ${timestamp}`,
+      `Flags raw : 0x${flags.toString(16).toUpperCase().padStart(4,'0')}`
+    ].join('\n');
+    out.style.color = 'var(--accent)';
+  } catch (e) { out.textContent = `오류: ${e.message}`; out.style.color = '#b91c1c'; }
+});
 
 function fdbParams(requireMac = true) {
   const mac = (document.getElementById('fdbMac')?.value || '').trim();
@@ -3712,7 +4089,7 @@ function fdbParams(requireMac = true) {
     mac,
     vlanValid: document.getElementById('fdbVlanValid')?.checked || false,
     vlanId:    Number(document.getElementById('fdbVlanId')?.value  || 0),
-    port:      Number(document.getElementById('fdbPort')?.value    || 1)
+    port:      Number(document.getElementById('fdbPort')?.value    || 0)
   };
 }
 
@@ -3829,7 +4206,157 @@ document.getElementById('autoRunBtn')?.addEventListener('click', async () => {
   }
 });
 
-document.querySelector('[data-view="autoView"]')?.addEventListener('click', () => autoPoll());
+document.querySelector('[data-htview="autoView"]')?.addEventListener('click', () => autoPoll());
+
+// ============================================================
+// Port Monitor — 6-port switch live link status
+// ============================================================
+
+let _portMonitorTimer = null;
+
+async function portMonitorPoll() {
+  const grid = document.getElementById('portMonitorGrid');
+  const timeEl = document.getElementById('portMonitorTime');
+  try {
+    const d = await api('/api/ports/link-status');
+    const ports = d.ports || [];
+    ports.forEach((p) => { portLinkStatus[p.port] = p.linkUp; });
+    if (grid) {
+      grid.innerHTML = portLinkStatus.map((up, i) => {
+        const cls = up === true ? 'up' : up === false ? 'down' : '';
+        const label = up === true ? 'Link UP' : up === false ? 'Link DOWN' : '—';
+        return `<div class="portMonitorCard ${cls}">
+          <div class="portMonitorDot"></div>
+          <div class="portMonitorLabel">Port ${i}</div>
+          <div class="portMonitorState">${label}</div>
+        </div>`;
+      }).join('');
+    }
+    if (timeEl) timeEl.textContent = new Date().toLocaleTimeString();
+    renderControlTopology();
+  } catch (e) {
+    if (grid) grid.innerHTML = `<div class="portMonitorPlaceholder">⚠ ${e.message} — EthernetPacketGenerator 연결 필요</div>`;
+    if (timeEl) timeEl.textContent = '';
+  }
+}
+
+document.getElementById('portMonitorRefresh')?.addEventListener('click', portMonitorPoll);
+
+document.querySelector('[data-htview="controlView"]')?.addEventListener('click', () => {
+  portMonitorPoll();
+  if (!_portMonitorTimer) {
+    _portMonitorTimer = setInterval(portMonitorPoll, 3000);
+  }
+});
+
+// Stop polling when leaving Control sub-tab or HyperTerminal top-level tab
+document.querySelectorAll('[data-htview]').forEach((btn) => {
+  if (btn.dataset.htview !== 'controlView') {
+    btn.addEventListener('click', () => { clearInterval(_portMonitorTimer); _portMonitorTimer = null; });
+  }
+});
+document.querySelectorAll('[data-view]').forEach((btn) => {
+  if (btn.dataset.view !== 'hyperTerminalView') {
+    btn.addEventListener('click', () => { clearInterval(_portMonitorTimer); _portMonitorTimer = null; });
+  }
+});
+
+// ============================================================
+// ECharts — Benchmark / RFC 2544 / Sweep result charts
+// ============================================================
+
+const _echartsInstances = {};
+
+function getChart(id) {
+  const el = document.getElementById(id);
+  if (!el || typeof echarts === 'undefined') return null;
+  if (!_echartsInstances[id]) _echartsInstances[id] = echarts.init(el, null, { renderer: 'svg' });
+  return _echartsInstances[id];
+}
+
+function showChartPanel(panelId) {
+  const el = document.getElementById(panelId);
+  if (el) el.classList.remove('hidden');
+}
+
+function renderBenchChart(results) {
+  showChartPanel('benchChartPanel');
+  const chart = getChart('benchChart');
+  if (!chart) return;
+  const valid = results.filter((r) => r.report);
+  const labels = valid.map((r) => r.pair.label);
+  const mbps   = valid.map((r) => Number(r.report.stats.throughputMbps || 0).toFixed(2));
+  const loss   = valid.map((r) => Number(r.report.stats.lossPct || 0).toFixed(2));
+  chart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['Throughput (Mbps)', 'Loss (%)'], top: 4 },
+    grid: { left: 50, right: 50, bottom: 36, top: 40 },
+    xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 11, rotate: labels.length > 3 ? 20 : 0 } },
+    yAxis: [
+      { type: 'value', name: 'Mbps', nameTextStyle: { fontSize: 11 }, axisLabel: { fontSize: 11 } },
+      { type: 'value', name: 'Loss %', nameTextStyle: { fontSize: 11 }, axisLabel: { fontSize: 11 }, max: 100 }
+    ],
+    series: [
+      { name: 'Throughput (Mbps)', type: 'bar', data: mbps, itemStyle: { color: '#0b5cab' } },
+      { name: 'Loss (%)', type: 'bar', yAxisIndex: 1, data: loss, itemStyle: { color: '#ef4444' } }
+    ]
+  });
+}
+
+function renderRfcChart(rfcResults) {
+  showChartPanel('rfcChartPanel');
+  const chart = getChart('rfcChart');
+  if (!chart) return;
+  const sizes = rfcResults.map((r) => r.frameSize || r.frame_size || r.size || '?');
+  const util  = rfcResults.map((r) => Number(r.utilizationPct || 0).toFixed(1));
+  const p95   = rfcResults.map((r) => Number(r.p95LatencyUs || r.latencyP95Us || 0).toFixed(1));
+  chart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['Utilization (%)', 'P95 Latency (µs)'], top: 4 },
+    grid: { left: 60, right: 60, bottom: 36, top: 40 },
+    xAxis: { type: 'category', data: sizes, name: 'Frame size (B)', nameLocation: 'middle', nameGap: 26, axisLabel: { fontSize: 11 } },
+    yAxis: [
+      { type: 'value', name: 'Util %', max: 100, nameTextStyle: { fontSize: 11 }, axisLabel: { fontSize: 11 } },
+      { type: 'value', name: 'Lat µs', nameTextStyle: { fontSize: 11 }, axisLabel: { fontSize: 11 } }
+    ],
+    series: [
+      { name: 'Utilization (%)', type: 'line', data: util, symbol: 'circle', lineStyle: { color: '#0b5cab' }, itemStyle: { color: '#0b5cab' } },
+      { name: 'P95 Latency (µs)', type: 'line', yAxisIndex: 1, data: p95, symbol: 'diamond', lineStyle: { color: '#f59e0b', type: 'dashed' }, itemStyle: { color: '#f59e0b' } }
+    ]
+  });
+}
+
+function renderSweepChart(sweepResults) {
+  showChartPanel('sweepChartPanel');
+  const chart = getChart('sweepChart');
+  if (!chart) return;
+  const sizes  = sweepResults.map((r) => r.frameSize || r.frame_size || r.payloadSize || '?');
+  const mbps   = sweepResults.map((r) => {
+    const s = r.stats || {};
+    return Number(s.throughputMbps || 0).toFixed(2);
+  });
+  const loss   = sweepResults.map((r) => {
+    const s = r.stats || {};
+    return Number(s.lossPct || 0).toFixed(2);
+  });
+  chart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['Throughput (Mbps)', 'Loss (%)'], top: 4 },
+    grid: { left: 60, right: 60, bottom: 36, top: 40 },
+    xAxis: { type: 'category', data: sizes, name: 'Frame size (B)', nameLocation: 'middle', nameGap: 26, axisLabel: { fontSize: 11 } },
+    yAxis: [
+      { type: 'value', name: 'Mbps', nameTextStyle: { fontSize: 11 }, axisLabel: { fontSize: 11 } },
+      { type: 'value', name: 'Loss %', max: 100, nameTextStyle: { fontSize: 11 }, axisLabel: { fontSize: 11 } }
+    ],
+    series: [
+      { name: 'Throughput (Mbps)', type: 'line', data: mbps, areaStyle: { color: 'rgba(11,92,171,.15)' }, symbol: 'circle', lineStyle: { color: '#0b5cab' }, itemStyle: { color: '#0b5cab' } },
+      { name: 'Loss (%)', type: 'line', yAxisIndex: 1, data: loss, symbol: 'triangle', lineStyle: { color: '#ef4444', type: 'dashed' }, itemStyle: { color: '#ef4444' } }
+    ]
+  });
+}
 
 // ============================================================
 // Lab tab — TestCase Manager + Sequence Sender
@@ -3914,21 +4441,41 @@ function labRenderSequence(items) {
   const tbody = document.getElementById('sequenceRows');
   if (!tbody) return;
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:1rem;">No sequence items</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:1rem;">No sequence items — add an event above or select a test case</td></tr>';
     return;
   }
-  tbody.innerHTML = items.map((s, i) => `
-    <tr>
-      <td>${i + 1}</td>
-      <td>${escHtml(s.kind || '')}</td>
-      <td>${s.checked !== false ? '✓' : ''}</td>
-      <td>${escHtml(s.eventType || s.type || s.name || '')}</td>
-      <td>${escHtml(s.address || '')}</td>
-      <td>${escHtml(s.value || '')}</td>
-      <td>${escHtml(s.mask || '')}</td>
-      <td>${escHtml(s.timeoutMs != null ? s.timeoutMs + ' ms' : s.delayMs ? s.delayMs + ' ms' : '')}</td>
-    </tr>
-  `).join('');
+  tbody.innerHTML = items.map((s, i) => {
+    const idx = s.index ?? i;
+    const kind = s.kind || 'Event';
+    const evType = s.eventType || s.kind || '';
+    const rawLabel = s.label || s.name
+      || (s.serialText ? `"${s.serialText}"` : '')
+      || (s.captureFilter ? s.captureFilter : '')
+      || evType || '';
+    const label = escHtml(rawLabel);
+    const addr = escHtml(s.address || s.macAddress || '');
+    const val  = escHtml(s.value || s.serialHex || '');
+    const timing = s.delayMs != null ? `${s.delayMs} ms`
+                 : s.timeoutMs != null ? `${s.timeoutMs} ms`
+                 : (s.timingMs != null ? `${s.timingMs} ms` : '');
+    return `<tr>
+      <td>${idx + 1}</td>
+      <td><span class="sbfBadge ${kind === 'Event' ? 'sbf-monitor' : 'sbf-primary'}">${escHtml(kind)}</span></td>
+      <td style="font-size:.78rem;">${escHtml(evType)}</td>
+      <td style="font-size:.8rem;max-width:220px;overflow:hidden;text-overflow:ellipsis;" title="${label}">${label}</td>
+      <td class="monoInput" style="font-size:.75rem;">${addr}</td>
+      <td class="monoInput" style="font-size:.75rem;">${val}</td>
+      <td style="font-size:.78rem;">${escHtml(timing)}</td>
+      <td><button class="ghostBtn" style="min-height:22px;padding:0 6px;font-size:.72rem;color:#b91c1c;border-color:#b91c1c;" data-seq-remove="${idx}">✕</button></td>
+    </tr>`;
+  }).join('');
+  tbody.querySelectorAll('[data-seq-remove]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const idx = Number(btn.dataset.seqRemove);
+      await api('/api/sequence/event/remove', { method: 'POST', body: JSON.stringify({ index: idx }) });
+      await labLoadSequence();
+    });
+  });
 }
 
 function escHtml(v) {
@@ -3979,4 +4526,901 @@ document.getElementById('tcSaveCurrent')?.addEventListener('click', labSaveCurre
 document.getElementById('tcRefresh')?.addEventListener('click', labLoadTestCases);
 document.getElementById('tcAddGroup')?.addEventListener('click', labAddGroup);
 document.getElementById('tcAdd')?.addEventListener('click', labAddTestCase);
-document.querySelector('[data-view="labView"]')?.addEventListener('click', () => labLoadTestCases());
+document.querySelector('[data-view="labView"]')?.addEventListener('click', () => { labLoadTestCases(); labLoadSequence(); });
+
+async function labLoadSequence() {
+  try {
+    const data = await api('/api/sequence/full');
+    labRenderSequence(data.items || []);
+  } catch (err) {
+    const tbody = document.getElementById('sequenceRows');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted);padding:1rem;text-align:center;">⚠ ${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+function seqUpdateFields() {
+  const t = document.getElementById('seqEventType')?.value || 'Delay';
+  const showDelay          = t === 'Delay';
+  const showAddr           = ['RegWrite','RegRead','RegWaitFor','FdbWaitFor'].includes(t);
+  const showValue          = t === 'RegWrite';
+  const showMask           = ['RegWaitFor','FdbWaitFor'].includes(t);
+  const showExpected       = ['RegWaitFor','FdbWaitFor'].includes(t);
+  const showTimeout        = ['RegWaitFor','FdbWaitFor','SerialVerify','CaptureVerify'].includes(t);
+  const showMac            = ['FdbWrite','FdbRead'].includes(t);
+  const showPort           = t === 'FdbWrite';
+  const showSerialText     = ['SerialSend','SerialVerify'].includes(t);
+  const showSerialHex      = t === 'SerialSend';
+  const showCaptureIface   = t === 'CaptureVerify';
+  const showCaptureFilter  = t === 'CaptureVerify';
+  const showCaptureExpected= t === 'CaptureVerify';
+  const set = (id, visible) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', !visible);
+  };
+  set('seqDelayField',          showDelay);
+  set('seqAddrField',           showAddr);
+  set('seqValueField',          showValue);
+  set('seqMaskField',           showMask);
+  set('seqExpectedField',       showExpected);
+  set('seqTimeoutField',        showTimeout);
+  set('seqMacField',            showMac);
+  set('seqPortField',           showPort);
+  set('seqSerialTextField',     showSerialText);
+  set('seqSerialHexField',      showSerialHex);
+  set('seqCaptureIfaceField',   showCaptureIface);
+  set('seqCaptureFilterField',  showCaptureFilter);
+  set('seqCaptureExpectedField',showCaptureExpected);
+}
+
+document.getElementById('seqEventType')?.addEventListener('change', seqUpdateFields);
+seqUpdateFields(); // init
+
+document.getElementById('seqAddEvent')?.addEventListener('click', async () => {
+  const evType = document.getElementById('seqEventType')?.value || 'Delay';
+  const body = {
+    eventType:       evType,
+    delayMs:         Number(document.getElementById('seqDelayMs')?.value          || 100),
+    address:         document.getElementById('seqAddress')?.value.trim()           || '0',
+    value:           document.getElementById('seqValue')?.value.trim()             || '0',
+    mask:            document.getElementById('seqMask')?.value.trim()              || '0xFFFFFFFF',
+    expected:        document.getElementById('seqExpected')?.value.trim()          || '0',
+    timeoutMs:       Number(document.getElementById('seqTimeout')?.value           || 1000),
+    macAddress:      document.getElementById('seqMac')?.value.trim()               || '00:00:00:00:00:00',
+    port:            Number(document.getElementById('seqPort')?.value              || 0),
+    serialText:      document.getElementById('seqSerialText')?.value.trim()        || '',
+    serialHex:       document.getElementById('seqSerialHex')?.value.trim()         || '',
+    captureInterface:document.getElementById('seqCaptureIface')?.value.trim()      || '',
+    captureFilter:   document.getElementById('seqCaptureFilter')?.value.trim()     || '',
+    captureExpected: Number(document.getElementById('seqCaptureExpected')?.value   || 1)
+  };
+  try {
+    await api('/api/sequence/event/add', { method: 'POST', body: JSON.stringify(body) });
+    await labLoadSequence();
+  } catch (err) {
+    alert(`Add event failed: ${err.message}`);
+  }
+});
+
+document.getElementById('seqClearEvents')?.addEventListener('click', async () => {
+  if (!confirm('Clear all events from the sequence?')) return;
+  await api('/api/sequence/events/clear', { method: 'POST', body: '{}' });
+  await labLoadSequence();
+});
+
+document.getElementById('seqRefreshFull')?.addEventListener('click', labLoadSequence);
+
+// =============================================================================
+// Serial Macro Buttons
+// =============================================================================
+
+let _serialMacros = (() => {
+  try { return JSON.parse(localStorage.getItem('serialMacros') || '[]'); } catch { return []; }
+})();
+
+function _saveMacros() { localStorage.setItem('serialMacros', JSON.stringify(_serialMacros)); }
+
+function _renderMacros() {
+  const container = document.getElementById('serialMacroBtns');
+  if (!container) return;
+  if (!_serialMacros.length) {
+    container.innerHTML = '<span style="font-size:.75rem;color:var(--muted)">No macros — click ⚙ Edit to add</span>';
+    return;
+  }
+  container.innerHTML = _serialMacros.map((m, i) =>
+    `<span class="serialMacroPill">
+      <button class="serialMacroBtn" data-mi="${i}" title="${escHtml(m.text + (m.eol || ''))}">${escHtml(m.label || `M${i+1}`)}</button>
+      <button class="serialMacroDelBtn" data-md="${i}" title="Delete macro">✕</button>
+    </span>`
+  ).join('');
+  container.querySelectorAll('[data-mi]').forEach(btn =>
+    btn.addEventListener('click', () => _sendMacro(Number(btn.dataset.mi))));
+  container.querySelectorAll('[data-md]').forEach(btn =>
+    btn.addEventListener('click', () => {
+      _serialMacros.splice(Number(btn.dataset.md), 1);
+      _saveMacros(); _renderMacros();
+    }));
+}
+
+async function _sendMacro(idx) {
+  const m = _serialMacros[idx];
+  if (!m) return;
+  if (!state.serial.sessionId) { alert('Serial port not connected'); return; }
+  const raw = m.text.replace(/\\r/g, '\r').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+  const text = raw + (m.eol || '');
+  const bytes = new TextEncoder().encode(text);
+  const hex = Array.from(bytes, b => b.toString(16).padStart(2,'0')).join('');
+  try {
+    await api('/api/tty/write', { method: 'POST', body: JSON.stringify({ sessionId: state.serial.sessionId, hex }) });
+    state.serial.txCount += bytes.length;
+    const txEl = document.getElementById('serTx');
+    if (txEl) txEl.textContent = state.serial.txCount;
+    if (document.getElementById('serialEcho')?.checked)
+      appendSerialLog(`> [${escHtml(m.label)}] ${escHtml(m.text)}\n`, 'tx');
+  } catch (err) {
+    appendSerialLog(`[macro error] ${escHtml(err.message)}\n`, 'err');
+  }
+}
+
+document.getElementById('serialMacroManage')?.addEventListener('click', () => {
+  const panel = document.getElementById('serialMacroPanel');
+  if (panel) panel.classList.toggle('hidden');
+});
+
+document.getElementById('macroAddBtn')?.addEventListener('click', () => {
+  const label = document.getElementById('macroLabel')?.value.trim() || 'Macro';
+  const text  = document.getElementById('macroText')?.value ?? '';
+  const eol   = document.getElementById('macroEolSel')?.value ?? '\r';
+  if (!text && !eol) return;
+  _serialMacros.push({ label, text, eol });
+  _saveMacros(); _renderMacros();
+  const lEl = document.getElementById('macroLabel');
+  const tEl = document.getElementById('macroText');
+  if (lEl) lEl.value = '';
+  if (tEl) tEl.value = '';
+});
+
+_renderMacros();
+
+// =============================================================================
+// Sequence Event Presets
+// =============================================================================
+
+const _SEQ_PRESETS = {
+  delay100:  { eventType: 'Delay',      delayMs: 100 },
+  delay1s:   { eventType: 'Delay',      delayMs: 1000 },
+  flushFdb:  { eventType: 'FdbFlush',   address: '0', value: '0', mask: '0xFFFFFFFF', macAddress: '00:00:00:00:00:00' },
+  readBmsr:  { eventType: 'RegRead',    address: '0x0001', value: '0', mask: '0xFFFFFFFF' },
+  waitLink:  { eventType: 'RegWaitFor', address: '0x0001', mask: '0x0004', expected: '0x0004', timeoutMs: 5000 },
+};
+
+let _seqCustomPresets = (() => {
+  try { return JSON.parse(localStorage.getItem('seqPresets') || '[]'); } catch { return []; }
+})();
+
+function _saveSeqPresets() { localStorage.setItem('seqPresets', JSON.stringify(_seqCustomPresets)); }
+
+function _renderSeqPresets() {
+  const container = document.getElementById('seqCustomPresets');
+  if (!container) return;
+  container.innerHTML = _seqCustomPresets.map((p, i) =>
+    `<span class="seqPresetPill">
+      <button class="seqPreset seqPresetCustom" data-pi="${i}" title="Add ${escHtml(p.label)}">${escHtml(p.label)}</button>
+      <button class="seqPresetDelBtn" data-pd="${i}" title="Delete preset">✕</button>
+    </span>`
+  ).join('');
+  container.querySelectorAll('[data-pi]').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      const preset = _seqCustomPresets[Number(btn.dataset.pi)]?.event;
+      if (preset) {
+        try {
+          await api('/api/sequence/event/add', { method: 'POST', body: JSON.stringify(preset) });
+          await labLoadSequence();
+        } catch (err) { alert(`Add preset failed: ${err.message}`); }
+      }
+    }));
+  container.querySelectorAll('[data-pd]').forEach(btn =>
+    btn.addEventListener('click', () => {
+      _seqCustomPresets.splice(Number(btn.dataset.pd), 1);
+      _saveSeqPresets(); _renderSeqPresets();
+    }));
+}
+
+function _readSeqForm() {
+  return {
+    eventType:       document.getElementById('seqEventType')?.value     || 'Delay',
+    delayMs:         Number(document.getElementById('seqDelayMs')?.value  || 100),
+    address:         document.getElementById('seqAddress')?.value.trim()  || '0',
+    value:           document.getElementById('seqValue')?.value.trim()    || '0',
+    mask:            document.getElementById('seqMask')?.value.trim()     || '0xFFFFFFFF',
+    expected:        document.getElementById('seqExpected')?.value.trim() || '0',
+    timeoutMs:       Number(document.getElementById('seqTimeout')?.value  || 1000),
+    macAddress:      document.getElementById('seqMac')?.value.trim()      || '00:00:00:00:00:00',
+    port:            Number(document.getElementById('seqPort')?.value     || 0),
+    serialText:      document.getElementById('seqSerialText')?.value.trim()    || '',
+    serialHex:       document.getElementById('seqSerialHex')?.value.trim()     || '',
+    captureInterface:document.getElementById('seqCaptureIface')?.value.trim()  || '',
+    captureFilter:   document.getElementById('seqCaptureFilter')?.value.trim() || '',
+    captureExpected: Number(document.getElementById('seqCaptureExpected')?.value || 1),
+  };
+}
+
+function _applyPresetToForm(preset) {
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined) el.value = v; };
+  setVal('seqEventType', preset.eventType);
+  if (preset.delayMs !== undefined)  setVal('seqDelayMs', preset.delayMs);
+  if (preset.address)   setVal('seqAddress',  preset.address);
+  if (preset.value)     setVal('seqValue',    preset.value);
+  if (preset.mask)      setVal('seqMask',     preset.mask);
+  if (preset.expected)  setVal('seqExpected', preset.expected);
+  if (preset.timeoutMs) setVal('seqTimeout',  preset.timeoutMs);
+  if (preset.macAddress)setVal('seqMac',      preset.macAddress);
+  if (preset.port !== undefined) setVal('seqPort', preset.port);
+  if (preset.serialText) setVal('seqSerialText', preset.serialText);
+  if (preset.serialHex)  setVal('seqSerialHex',  preset.serialHex);
+  seqUpdateFields();
+}
+
+document.querySelectorAll('.seqPreset[data-preset]').forEach(btn =>
+  btn.addEventListener('click', () => _applyPresetToForm(_SEQ_PRESETS[btn.dataset.preset] || {})));
+
+document.getElementById('seqSavePreset')?.addEventListener('click', () => {
+  const label = prompt('Preset name? (will appear as a quick-add button)');
+  if (!label?.trim()) return;
+  _seqCustomPresets.push({ label: label.trim(), event: _readSeqForm() });
+  _saveSeqPresets(); _renderSeqPresets();
+});
+
+_renderSeqPresets();
+
+// =============================================================================
+// MDIO / PHY
+// =============================================================================
+
+// Auto-fill PHY address when port selection changes
+document.getElementById('mdioPort')?.addEventListener('change', () => {
+  const PHY_ADDRS = ['0x00', '0x04', '0x05', '0x08', '0x0A', '0x0C'];
+  const port = Number(document.getElementById('mdioPort')?.value || 0);
+  const phyEl = document.getElementById('mdioPhyAddr');
+  if (phyEl && port >= 0 && port <= 5) phyEl.value = PHY_ADDRS[port];
+});
+
+document.getElementById('mdioReadBtn')?.addEventListener('click', async () => {
+  const out = document.getElementById('mdioAccResult');
+  if (!out) return;
+  out.textContent = '읽는 중...'; out.style.color = 'var(--muted)';
+  try {
+    const port    = Number(document.getElementById('mdioPort')?.value    || 0);
+    const phyAddr = document.getElementById('mdioPhyAddr')?.value.trim() || '0x00';
+    const regAddr = document.getElementById('mdioRegAddr')?.value.trim() || '0x01';
+    const d = await api('/api/mdio/read', { method: 'POST', body: JSON.stringify({ port, phyAddr, regAddr }) });
+    out.textContent = `Port ${port}  PHY[${phyAddr}]  Reg[${regAddr}] = ${d.value}`;
+    out.style.color = 'var(--accent)';
+  } catch (e) { out.textContent = `오류: ${e.message}`; out.style.color = '#b91c1c'; }
+});
+
+document.getElementById('mdioWriteBtn')?.addEventListener('click', async () => {
+  const out = document.getElementById('mdioAccResult');
+  if (!out) return;
+  out.textContent = '쓰는 중...'; out.style.color = 'var(--muted)';
+  try {
+    const port    = Number(document.getElementById('mdioPort')?.value      || 0);
+    const phyAddr = document.getElementById('mdioPhyAddr')?.value.trim()   || '0x00';
+    const regAddr = document.getElementById('mdioRegAddr')?.value.trim()   || '0x01';
+    const value   = document.getElementById('mdioWriteValue')?.value.trim()|| '0x0000';
+    await api('/api/mdio/write', { method: 'POST', body: JSON.stringify({ port, phyAddr, regAddr, value }) });
+    out.textContent = `Port ${port}  PHY[${phyAddr}]  Reg[${regAddr}] ← ${value}  완료`;
+    out.style.color = 'var(--ok)';
+  } catch (e) { out.textContent = `오류: ${e.message}`; out.style.color = '#b91c1c'; }
+});
+
+document.getElementById('mdioLinkStatusBtn')?.addEventListener('click', async () => {
+  const grid = document.getElementById('mdioLinkGrid');
+  if (!grid) return;
+  grid.innerHTML = '<span class="muted" style="font-size:.8rem;">읽는 중...</span>';
+  try {
+    const d = await api('/api/mdio/link-status');
+    grid.innerHTML = (d.ports || []).map(p => {
+      const cls   = p.linkUp === true ? 'up' : p.linkUp === false ? 'down' : '';
+      const label = p.linkUp === true ? 'UP' : p.linkUp === false ? 'DOWN' : '—';
+      return `<span class="mdioLinkBadge ${cls}"><span class="mdioLinkDot"></span>P${p.port} ${label}</span>`;
+    }).join('');
+  } catch (e) { grid.innerHTML = `<span style="color:#b91c1c;font-size:.8rem;">오류: ${e.message}</span>`; }
+});
+
+document.getElementById('mdioSetupApplyBtn')?.addEventListener('click', async () => {
+  const out = document.getElementById('mdioSetupResult');
+  if (!out) return;
+  out.textContent = '적용 중...'; out.style.color = 'var(--muted)';
+  try {
+    const port            = Number(document.getElementById('mdioPort')?.value || 0);
+    const enable          = document.getElementById('mdioSetupEnable')?.checked    ?? true;
+    const preDisable      = document.getElementById('mdioSetupPreDisable')?.checked ?? false;
+    const interruptEnable = document.getElementById('mdioSetupIntrEnable')?.checked ?? false;
+    const targetMhz       = Number(document.getElementById('mdioTargetMhz')?.value  || 2.5);
+    const d = await api('/api/mdio/setup', { method: 'POST', body: JSON.stringify({ port, enable, preDisable, interruptEnable, targetMhz }) });
+    out.textContent = `완료  SETUP=${d.setup}  TIME=${d.time}  CLK=${d.clk}  MILLISEC=${d.ms}`;
+    out.style.color = 'var(--ok)';
+  } catch (e) { out.textContent = `오류: ${e.message}`; out.style.color = '#b91c1c'; }
+});
+
+// =============================================================================
+// Timestamp
+// =============================================================================
+
+document.getElementById('timestampReadBtn')?.addEventListener('click', async () => {
+  const disp = document.getElementById('timestampDisplay');
+  if (!disp) return;
+  disp.textContent = '읽는 중...';
+  try {
+    const d = await api('/api/timestamp/read');
+    disp.textContent = d.isoString ? `${d.isoString}  (ns: ${d.ns})` : `sec=0x${(d.sec || 0).toString(16).toUpperCase()}  ns=${d.ns}`;
+    disp.style.color = 'var(--accent)';
+  } catch (e) { disp.textContent = `오류: ${e.message}`; disp.style.color = '#b91c1c'; }
+});
+
+document.getElementById('timestampStatusBtn')?.addEventListener('click', async () => {
+  const out = document.getElementById('tsStatusResult');
+  if (!out) return;
+  out.textContent = '읽는 중...';
+  try {
+    const d = await api('/api/timestamp/status');
+    out.textContent = `CTRL_0(ADDEND)=${d.ctrl0}  CTRL_1=${d.ctrl1}  INCREMENT=${d.increment}  PPS_SRC=${d.ppsSrc}  PPS_WIDTH=${d.ppsWidthMs}ms`;
+    out.style.color = 'var(--accent)';
+  } catch (e) { out.textContent = `오류: ${e.message}`; out.style.color = '#b91c1c'; }
+});
+
+document.getElementById('tsSetNowBtn')?.addEventListener('click', () => {
+  const now = new Date();
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('tsYear',  now.getFullYear());
+  set('tsMonth', now.getMonth() + 1);
+  set('tsDay',   now.getDate());
+  set('tsHour',  now.getHours());
+  set('tsMin',   now.getMinutes());
+  set('tsSec',   now.getSeconds());
+});
+
+document.getElementById('tsSetBtn')?.addEventListener('click', async () => {
+  const out = document.getElementById('tsSetResult');
+  if (!out) return;
+  out.textContent = '설정 중...'; out.style.color = 'var(--muted)';
+  try {
+    const get = (id) => Number(document.getElementById(id)?.value || 0);
+    const body = { year: get('tsYear'), month: get('tsMonth'), day: get('tsDay'), hour: get('tsHour'), min: get('tsMin'), sec: get('tsSec') };
+    const d = await api('/api/timestamp/set', { method: 'POST', body: JSON.stringify(body) });
+    out.textContent = `시간 설정 완료: ${d.isoString || ''}`;
+    out.style.color = 'var(--ok)';
+  } catch (e) { out.textContent = `오류: ${e.message}`; out.style.color = '#b91c1c'; }
+});
+
+// Auto-fill "Set Time" fields and auto-read Timestamp when entering Control sub-tab
+document.querySelector('[data-htview="controlView"]')?.addEventListener('click', () => {
+  const now = new Date();
+  const trySet = (id, v) => { const el = document.getElementById(id); if (el && !el.dataset.userEdited) el.value = v; };
+  trySet('tsYear',  now.getFullYear());
+  trySet('tsMonth', now.getMonth() + 1);
+  trySet('tsDay',   now.getDate());
+  trySet('tsHour',  now.getHours());
+  trySet('tsMin',   now.getMinutes());
+  trySet('tsSec',   now.getSeconds());
+
+  // Auto-read timestamp from hardware on tab entry
+  const disp = document.getElementById('timestampDisplay');
+  if (disp) {
+    disp.textContent = '읽는 중...';
+    api('/api/timestamp/read').then((d) => {
+      disp.textContent = d.isoString ? `${d.isoString}  (ns: ${d.ns})` : `sec=0x${(d.sec || 0).toString(16).toUpperCase()}  ns=${d.ns}`;
+      disp.style.color = 'var(--accent)';
+    }).catch((e) => {
+      disp.textContent = `(읽기 실패: ${e.message})`;
+      disp.style.color = 'var(--muted)';
+    });
+  }
+}, { capture: true });
+
+// =============================================================================
+// Counter
+// =============================================================================
+
+document.getElementById('counterReadBtn')?.addEventListener('click', async () => {
+  const statusEl = document.getElementById('counterStatus');
+  const tableEl  = document.getElementById('counterTable');
+  const tbody    = document.getElementById('counterRows');
+  const emptyEl  = document.getElementById('counterEmpty');
+  if (!tbody) return;
+
+  if (statusEl) statusEl.textContent = '읽는 중...';
+  if (emptyEl)  { emptyEl.style.display = 'block'; emptyEl.textContent = '읽는 중...'; }
+  if (tableEl)  tableEl.style.display = 'none';
+
+  try {
+    const port = document.getElementById('counterPort')?.value || 'all';
+    const d = await api(`/api/counter/read?port=${encodeURIComponent(port)}`);
+    const counters = d.counters || [];
+
+    if (statusEl) statusEl.textContent = `${counters.length}개 항목`;
+
+    if (!counters.length) {
+      if (emptyEl) { emptyEl.style.display = 'block'; emptyEl.textContent = '데이터 없음 — 시리얼 포트가 연결되어 있는지 확인하세요.'; }
+      return;
+    }
+
+    tbody.innerHTML = counters.map(c =>
+      `<tr>
+        <td>${escHtml(c.group || '')}</td>
+        <td>${escHtml(c.name  || '')}</td>
+        <td><code>${escHtml(c.address || '')}</code></td>
+        <td><code>${escHtml(c.value   || '')}</code></td>
+        <td style="text-align:right;">${c.valueDec ?? ''}</td>
+      </tr>`
+    ).join('');
+
+    if (emptyEl)  emptyEl.style.display = 'none';
+    if (tableEl)  tableEl.style.display = '';
+  } catch (e) {
+    if (statusEl) statusEl.textContent = `오류: ${e.message}`;
+    if (emptyEl)  { emptyEl.style.display = 'block'; emptyEl.textContent = `오류: ${e.message}`; }
+    if (tableEl)  tableEl.style.display = 'none';
+  }
+});
+
+// =============================================================================
+// Capture Address — remote peer capture with PASS/FAIL evaluation
+// Fetch peer's captured packets via the Node.js proxy /api/remote-capture/*
+// =============================================================================
+
+const caState = {
+  peerUrl: 'http://localhost:8080',
+  packets: [],          // all captured packets accumulated
+  ifaces: [],           // interface objects from peer probe
+  selectedIfaces: [],   // interface keys currently checked
+  isCapturing: false,
+  pollTimer: null,
+  lastOffset: 0,        // number of packets fetched so far (for incremental poll)
+  selectedIdx: -1,
+  targetAddr: '',       // raw text from caAddrInput (for PASS/FAIL)
+  displayFilter: '',    // current display filter string
+};
+
+// ─── Probe peer — GET peer's interfaces via server proxy ─────────────────────
+async function caProbe() {
+  const peerUrlEl = $('caPeerUrl');
+  const statusEl  = $('caPeerStatus');
+  const listEl    = $('caIfaceList');
+  const startBtn  = $('caStartBtn');
+  if (!peerUrlEl) return;
+
+  const peerUrl = peerUrlEl.value.trim() || 'http://localhost:8080';
+  caState.peerUrl = peerUrl;
+
+  if (statusEl) { statusEl.textContent = 'Probing…'; statusEl.className = 'caPeerStatus'; }
+  if (listEl)   listEl.textContent = 'loading…';
+  if (startBtn) startBtn.disabled = true;
+
+  try {
+    const data = await api('/api/remote-capture/probe', {
+      method: 'POST',
+      body: JSON.stringify({ peerUrl })
+    });
+    caState.ifaces = data.interfaces || [];
+    if (!caState.ifaces.length) {
+      if (listEl) listEl.textContent = '— no NICs found on peer —';
+      if (statusEl) { statusEl.textContent = 'No NICs'; statusEl.className = 'caPeerStatus warn'; }
+      return;
+    }
+    // Auto-select first interface
+    if (!caState.selectedIfaces.length) {
+      caState.selectedIfaces = [caState.ifaces[0].key || caState.ifaces[0].name];
+    }
+    caRenderIfaceList();
+    if (statusEl) { statusEl.textContent = `OK — ${caState.ifaces.length} NIC(s)`; statusEl.className = 'caPeerStatus ok'; }
+    if (startBtn) startBtn.disabled = false;
+  } catch (err) {
+    if (listEl)   listEl.textContent = `Probe failed: ${err.message}`;
+    if (statusEl) { statusEl.textContent = `Error: ${err.message}`; statusEl.className = 'caPeerStatus fail'; }
+  }
+}
+
+// ─── Render peer interface checkboxes ─────────────────────────────────────────
+function caRenderIfaceList() {
+  const listEl   = $('caIfaceList');
+  const startBtn = $('caStartBtn');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  for (const iface of caState.ifaces) {
+    const key   = iface.key || iface.name;
+    const label = iface.name || key;
+    const mac   = iface.mac ? ` (${iface.mac})` : '';
+    const chip  = document.createElement('label');
+    chip.className = 'caIfaceChip' + (caState.selectedIfaces.includes(key) ? ' selected' : '');
+    chip.title = iface.description || label;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = key;
+    cb.checked = caState.selectedIfaces.includes(key);
+    cb.addEventListener('change', () => {
+      if (cb.checked) {
+        if (!caState.selectedIfaces.includes(key)) caState.selectedIfaces.push(key);
+      } else {
+        caState.selectedIfaces = caState.selectedIfaces.filter((k) => k !== key);
+      }
+      chip.classList.toggle('selected', cb.checked);
+      if (startBtn) startBtn.disabled = caState.selectedIfaces.length === 0;
+    });
+    chip.appendChild(cb);
+    chip.append(` ${label}${mac}`);
+    listEl.appendChild(chip);
+  }
+  if (startBtn) startBtn.disabled = caState.selectedIfaces.length === 0;
+}
+
+// ─── Capture polling — GET packets from peer via proxy ────────────────────────
+async function caPoll() {
+  if (!caState.isCapturing) return;
+  try {
+    const params = new URLSearchParams({
+      peerUrl: caState.peerUrl,
+      limit:   500,
+      offset:  caState.lastOffset
+    });
+    const data = await api(`/api/remote-capture/packets?${params}`);
+    const newRows = data.rows || [];
+    if (newRows.length > 0) {
+      for (const pkt of newRows) {
+        pkt._idx   = caState.packets.length;
+        pkt._iface = pkt.interface || pkt.iface || '';
+        caState.packets.push(pkt);
+        // Apply display filter before rendering
+        if (caPacketPassesFilter(pkt, caState.displayFilter)) {
+          caRenderRow(pkt);
+        }
+      }
+      caState.lastOffset += newRows.length;
+      caUpdateCount();
+    }
+  } catch {
+    // silently swallow polling errors
+  }
+}
+
+// ─── Display filter helper ────────────────────────────────────────────────────
+function caPacketPassesFilter(pkt, filter) {
+  if (!filter) return true;
+  // Reuse the global frameMatchesFilter if available, otherwise do simple substring
+  if (typeof frameMatchesFilter === 'function') {
+    return frameMatchesFilter(pkt, filter);
+  }
+  const hay = JSON.stringify(pkt).toLowerCase();
+  return hay.includes(filter.toLowerCase());
+}
+
+// ─── Row renderer ─────────────────────────────────────────────────────────────
+function caRenderRow(packet) {
+  const tbody = $('caRows');
+  if (!tbody) return;
+  const empty = $('caPacketEmpty');
+  if (empty) empty.classList.add('hidden');
+
+  const decoded = packet.decoded || {};
+  const eth     = decoded.ethernet || decoded.eth || {};
+  const srcMac  = eth.srcMac || eth.src || '-';
+  const dstMac  = eth.dstMac || eth.dst || '-';
+  const srcIp   = decoded.ipv4?.src || decoded.arp?.senderIp || decoded.ipv6?.src || '-';
+  const dstIp   = decoded.ipv4?.dst || decoded.arp?.targetIp || decoded.ipv6?.dst || '-';
+  const t = packet.timestamp;
+  const d = new Date(t * 1000);
+  const ms  = String(d.getMilliseconds()).padStart(3, '0');
+  const tStr = `${d.toLocaleTimeString('en-GB')}.${ms}`;
+  const proto = protocolName(decoded);
+  const info  = packetInfo(decoded);
+  const idx   = packet._idx;
+  const iface = packet._iface || '';
+
+  const tr = document.createElement('tr');
+  tr.dataset.idx = String(idx);
+  tr.className   = rowProtoClass(decoded);
+
+  // Highlight rows matching target address
+  if (caState.targetAddr && caPacketMatchesTarget(packet, caState.targetAddr)) {
+    tr.classList.add('ca-match');
+  }
+
+  tr.innerHTML = `<td class="colNum">${idx + 1}</td><td class="colTime">${tStr}</td><td class="colIface">${iface}</td><td class="colSrcMac">${srcMac}</td><td class="colDstMac">${dstMac}</td><td class="colSrc">${srcIp}</td><td class="colDst">${dstIp}</td><td class="colProto">${proto}</td><td class="colLen">${packet.length || 0}</td><td>${info}</td>`;
+  tbody.appendChild(tr);
+}
+
+// ─── Packet count display ─────────────────────────────────────────────────────
+function caUpdateCount() {
+  const el = $('caPacketCount');
+  if (el) el.textContent = `${caState.packets.length} packet${caState.packets.length !== 1 ? 's' : ''}`;
+}
+
+// ─── Target address matcher ───────────────────────────────────────────────────
+function caPacketMatchesTarget(packet, addr) {
+  if (!addr) return false;
+  const a = addr.toLowerCase().trim();
+  const d = packet.decoded || {};
+  const eth = d.ethernet || d.eth || {};
+  const srcMac = (eth.srcMac || eth.src || '').toLowerCase();
+  const dstMac = (eth.dstMac || eth.dst || '').toLowerCase();
+  // IP match
+  if (/^\d{1,3}\.\d{1,3}/.test(a)) {
+    const srcIp = (d.ipv4?.src || d.arp?.senderIp || d.ipv6?.src || '').toLowerCase();
+    const dstIp = (d.ipv4?.dst || d.arp?.targetIp || d.ipv6?.dst || '').toLowerCase();
+    return srcIp.includes(a) || dstIp.includes(a);
+  }
+  // MAC match
+  return srcMac.includes(a) || dstMac.includes(a);
+}
+
+// ─── PASS/FAIL check ─────────────────────────────────────────────────────────
+function caCheck() {
+  const addrInput = $('caAddrInput');
+  const resultEl  = $('caResult');
+  if (!addrInput || !resultEl) return;
+
+  const addr = (addrInput.value || '').trim();
+  caState.targetAddr = addr;
+
+  // Re-highlight all rows
+  document.querySelectorAll('#caRows tr').forEach((tr) => {
+    const idx = Number(tr.dataset.idx);
+    const pkt = caState.packets[idx];
+    if (pkt) tr.classList.toggle('ca-match', addr ? caPacketMatchesTarget(pkt, addr) : false);
+  });
+
+  if (!addr) {
+    resultEl.textContent = '';
+    resultEl.className   = 'caResult';
+    return;
+  }
+
+  const total   = caState.packets.length;
+  const matches = caState.packets.filter((p) => caPacketMatchesTarget(p, addr));
+  const verdict = matches.length > 0 ? 'PASS' : 'FAIL';
+  resultEl.className   = `caResult ${verdict.toLowerCase()}`;
+  resultEl.textContent = `${verdict}  —  Target: ${addr}  |  Matched: ${matches.length}/${total} packet(s)`;
+}
+
+// ─── Start capture on peer ────────────────────────────────────────────────────
+async function caStartCapture() {
+  if (caState.isCapturing) return;
+  if (!caState.selectedIfaces.length) { toast('No interface selected', 'warn'); return; }
+
+  // Reset local state
+  caState.packets    = [];
+  caState.lastOffset = 0;
+  caState.selectedIdx = -1;
+  caState.targetAddr  = '';
+  const tbody = $('caRows'); if (tbody) tbody.innerHTML = '';
+  const empty = $('caPacketEmpty');
+  if (empty) { empty.classList.remove('hidden'); empty.textContent = 'Capturing from peer…'; }
+  const det = $('caDetailPane'); if (det) det.classList.add('hidden');
+  const res = $('caResult'); if (res) { res.textContent = ''; res.className = 'caResult'; }
+  caUpdateCount();
+
+  try {
+    await api('/api/remote-capture/start', {
+      method: 'POST',
+      body: JSON.stringify({ peerUrl: caState.peerUrl, interfaces: caState.selectedIfaces })
+    });
+  } catch (err) {
+    toast(`Capture start failed: ${err.message}`, 'fail');
+    return;
+  }
+
+  caState.isCapturing = true;
+  const startBtn = $('caStartBtn');
+  const stopBtn  = $('caStopBtn');
+  if (startBtn) { startBtn.disabled = true; startBtn.textContent = '● Capturing'; }
+  if (stopBtn)  stopBtn.disabled = false;
+
+  caState.pollTimer = setInterval(caPoll, 500);
+}
+
+// ─── Stop capture on peer ─────────────────────────────────────────────────────
+async function caStopCapture() {
+  if (!caState.isCapturing) return;
+  caState.isCapturing = false;
+  clearInterval(caState.pollTimer);
+  caState.pollTimer = null;
+
+  try {
+    await api('/api/remote-capture/stop', {
+      method: 'POST',
+      body: JSON.stringify({ peerUrl: caState.peerUrl })
+    });
+  } catch { /* ignore */ }
+
+  // One final poll
+  await caPoll();
+
+  const startBtn = $('caStartBtn');
+  const stopBtn  = $('caStopBtn');
+  if (startBtn) { startBtn.disabled = false; startBtn.textContent = '▶ Start Capture'; }
+  if (stopBtn)  stopBtn.disabled = true;
+
+  const empty = $('caPacketEmpty');
+  if (empty && caState.packets.length === 0) {
+    empty.classList.remove('hidden');
+    empty.textContent = 'No packets captured from peer.';
+  }
+  caUpdateCount();
+}
+
+// ─── Clear ────────────────────────────────────────────────────────────────────
+async function caClear() {
+  await caStopCapture();
+  caState.packets    = [];
+  caState.lastOffset = 0;
+  caState.selectedIdx = -1;
+  caState.targetAddr  = '';
+  const tbody = $('caRows'); if (tbody) tbody.innerHTML = '';
+  const res   = $('caResult'); if (res) { res.textContent = ''; res.className = 'caResult'; }
+  const det   = $('caDetailPane'); if (det) det.classList.add('hidden');
+  const empty = $('caPacketEmpty');
+  if (empty) { empty.classList.remove('hidden'); empty.textContent = 'Probe the peer, select an interface, then press Start Capture.'; }
+  const addrIn = $('caAddrInput'); if (addrIn) addrIn.value = '';
+  caUpdateCount();
+
+  try {
+    await api('/api/remote-capture/clear', {
+      method: 'POST',
+      body: JSON.stringify({ peerUrl: caState.peerUrl })
+    });
+  } catch { /* ignore */ }
+}
+
+// ─── Format raw hex string into 16-byte-per-line hex dump ────────────────────
+function formatHex(raw) {
+  if (!raw) return '';
+  const clean = raw.replace(/\s/g, '');
+  const lines = [];
+  for (let offset = 0; offset < clean.length; offset += 32) {
+    const chunk = clean.slice(offset, offset + 32);
+    const bytes = chunk.match(/.{1,2}/g) || [];
+    const hex   = bytes.join(' ').padEnd(47, ' ');
+    const ascii = bytes.map((b) => {
+      const c = parseInt(b, 16);
+      return c >= 0x20 && c <= 0x7e ? String.fromCharCode(c) : '.';
+    }).join('');
+    lines.push(`${(offset / 2).toString(16).padStart(4, '0')}  ${hex}  ${ascii}`);
+  }
+  return lines.join('\n');
+}
+
+// ─── Show packet detail (decoded JSON + hex dump) ─────────────────────────────
+function caShowDetail(pkt) {
+  const pre = $('caDetailText');
+  if (!pre) return;
+  const parts = [];
+  if (pkt.decoded) parts.push(JSON.stringify(pkt.decoded, null, 2));
+  if (pkt.frameHex) parts.push('\n--- HEX ---\n' + formatHex(pkt.frameHex));
+  pre.textContent = parts.length ? parts.join('\n') : JSON.stringify(pkt, null, 2);
+}
+
+// ─── Load connected workers into the dropdown ─────────────────────────────────
+async function caLoadWorkers() {
+  const sel = $('caWorkerSelect');
+  if (!sel) return;
+  try {
+    const data = await api('/api/workers');
+    const workers = data.workers || [];
+    // Keep the placeholder option, rebuild the rest
+    while (sel.options.length > 1) sel.remove(1);
+    // Add "localhost (local)" as convenience
+    const localOpt = document.createElement('option');
+    localOpt.value = 'http://localhost:8080';
+    localOpt.textContent = 'localhost:8080 (local)';
+    sel.appendChild(localOpt);
+    for (const w of workers) {
+      const url = w.info?.url || w.info?.peerUrl || '';
+      const label = w.info?.label || w.id || w.info?.hostname || url || w.id;
+      const opt = document.createElement('option');
+      opt.value = url || `worker:${w.id}`;
+      opt.textContent = url ? `${label} — ${url}` : label;
+      opt.title = JSON.stringify(w.info || {});
+      sel.appendChild(opt);
+    }
+  } catch { /* ignore */ }
+}
+
+// ─── Wire up event listeners ──────────────────────────────────────────────────
+(function initCaptureAddress() {
+  const probeBtn   = $('caProbeBtn');
+  const startBtn   = $('caStartBtn');
+  const stopBtn    = $('caStopBtn');
+  const clearBtn   = $('caClearBtn');
+  const checkBtn   = $('caCheckBtn');
+  const addrInput  = $('caAddrInput');
+  const filterInput = $('caDisplayFilter');
+  const tbody      = $('caRows');
+
+  if (!startBtn) return; // view not in DOM
+
+  probeBtn?.addEventListener('click', caProbe);
+  startBtn.addEventListener('click', caStartCapture);
+  stopBtn.addEventListener('click', caStopCapture);
+  clearBtn.addEventListener('click', caClear);
+  checkBtn?.addEventListener('click', caCheck);
+
+  // Worker dropdown → autofill URL + re-probe
+  const workerSel = $('caWorkerSelect');
+  workerSel?.addEventListener('change', () => {
+    const val = workerSel.value;
+    if (!val) return;
+    const urlEl = $('caPeerUrl');
+    if (urlEl && val.startsWith('http')) {
+      urlEl.value = val;
+      caState.peerUrl = val;
+    }
+    workerSel.value = ''; // reset dropdown
+    caProbe();
+  });
+
+  // Enter in address input → check
+  addrInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') caCheck();
+  });
+
+  // Display filter
+  filterInput?.addEventListener('input', () => {
+    caState.displayFilter = filterInput.value.trim();
+    // Re-render visible rows according to filter
+    const allRows = document.querySelectorAll('#caRows tr');
+    allRows.forEach((tr) => {
+      const idx = Number(tr.dataset.idx);
+      const pkt = caState.packets[idx];
+      if (!pkt) return;
+      tr.style.display = caPacketPassesFilter(pkt, caState.displayFilter) ? '' : 'none';
+    });
+  });
+
+  // Row click → show detail
+  tbody?.addEventListener('click', (e) => {
+    const tr = e.target.closest('tr');
+    if (!tr || !tr.dataset.idx) return;
+    const idx = Number(tr.dataset.idx);
+    const pkt = caState.packets[idx];
+    if (!pkt) return;
+    caState.selectedIdx = idx;
+    document.querySelectorAll('#caRows tr').forEach((r) => r.classList.toggle('selected', r === tr));
+    const det = $('caDetailPane');
+    if (det) det.classList.remove('hidden');
+    caShowDetail(pkt);
+  });
+
+  // Tab activation → load workers + auto-probe if no interfaces yet
+  document.querySelector('[data-view="captureAddressView"]')?.addEventListener('click', () => {
+    caLoadWorkers();
+    if (!caState.ifaces.length) caProbe();
+  });
+})();
+
+// =============================================================================
+// WebSocket — receive worker events (tab change, capture, serial rx, …)
+// =============================================================================
+(function initWorkerEventSocket() {
+  let _ws = null;
+  let _wsRetry = null;
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    _ws = new WebSocket(`${proto}//${location.host}`);
+    _ws.onopen = () => { clearTimeout(_wsRetry); };
+    _ws.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      if (msg.type === 'workerEvent') handleWorkerEvent(msg.payload || {});
+    };
+    _ws.onclose = _ws.onerror = () => {
+      _ws = null;
+      _wsRetry = setTimeout(connect, 3000);
+    };
+  }
+  function handleWorkerEvent(payload) {
+    if (payload.kind === 'tabchange' && payload.view) {
+      showView(payload.view);
+    }
+  }
+  connect();
+})();

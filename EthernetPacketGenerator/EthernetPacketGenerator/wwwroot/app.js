@@ -534,6 +534,146 @@ async function init() {
     setStatus(`Offline - ${err.message}`, false);
     toast(`Server not reachable: ${err.message}`, 'bad');
   }
+
+  // ── Peer PC 제어 ────────────────────────────────────────────────────────────
+  initPeerControls();
+}
+
+// ── Peer PC 상태 ──────────────────────────────────────────────────────────────
+const peer = {
+  url: localStorage.getItem('peerUrl') || '',
+  captureInterfaces: new Set(),
+};
+
+function peerApi(path, options = {}) {
+  const peerPath = '/api/peer' + path;
+  return api(peerPath, options);
+}
+
+async function probePeer() {
+  const url = $('peerUrl').value.trim();
+  if (!url) { toast('Peer URL을 입력하세요.', 'warn'); return; }
+
+  try {
+    // 서버에 Peer URL 설정
+    await api('/api/peer/url', { method: 'POST', body: JSON.stringify({ url }) });
+    localStorage.setItem('peerUrl', url);
+    peer.url = url;
+
+    // Peer health 확인
+    const health = await peerApi('/health');
+    $('peerState').classList.add('ok');
+    $('peerLabel').textContent = `Peer: connected`;
+    toast(`Peer 연결 성공: ${health.service || 'OK'}`, 'ok');
+
+    // Peer 인터페이스 로드
+    await loadPeerInterfaces();
+  } catch (err) {
+    $('peerState').classList.remove('ok');
+    $('peerLabel').textContent = 'Peer: offline';
+    toast(`Peer 연결 실패: ${err.message}`, 'bad');
+  }
+}
+
+async function loadPeerInterfaces() {
+  try {
+    const data = await peerApi('/interfaces');
+    const list = $('peerCaptureInterfaces');
+    list.innerHTML = '';
+    peer.captureInterfaces.clear();
+
+    for (const iface of data.interfaces || []) {
+      const label = document.createElement('label');
+      label.className = 'check-row';
+      label.innerHTML = `
+        <input type="checkbox" value="${escapeHtml(iface.name)}">
+        <span><strong>${escapeHtml(iface.name)}</strong>
+        <small>${escapeHtml(iface.mac || '')} ${iface.state === 'up' ? '▲' : '▼'}</small></span>
+      `;
+      label.querySelector('input').addEventListener('change', (e) => {
+        if (e.target.checked) peer.captureInterfaces.add(iface.name);
+        else peer.captureInterfaces.delete(iface.name);
+      });
+      list.appendChild(label);
+    }
+    $('peerCaptureState').classList.add('ok');
+  } catch (err) {
+    $('peerCaptureInterfaces').innerHTML = `<p class="empty" style="font-size:12px;color:var(--danger,red)">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function startPeerCapture() {
+  try {
+    const ifaces = Array.from(peer.captureInterfaces);
+    await peerApi('/capture/start', {
+      method: 'POST',
+      body: JSON.stringify({ interfaces: ifaces }),
+    });
+    toast('Peer 캡처 시작', 'ok');
+  } catch (err) {
+    toast(`Peer 캡처 시작 실패: ${err.message}`, 'bad');
+  }
+}
+
+async function stopPeerCapture() {
+  try {
+    await peerApi('/capture/stop', { method: 'POST', body: '{}' });
+    toast('Peer 캡처 중지', 'ok');
+  } catch (err) {
+    toast(`Peer 캡처 중지 실패: ${err.message}`, 'bad');
+  }
+}
+
+async function fetchPeerPackets() {
+  try {
+    const data = await peerApi('/capture/packets?limit=500');
+    const rows = data.rows || [];
+    toast(`Peer에서 ${rows.length}개 패킷 수신`, 'ok');
+
+    // 기존 캡처 테이블에 Peer 패킷 추가 (구분 표시)
+    if (rows.length === 0) return;
+
+    const tbody = $('captureRows');
+    if (tbody.querySelector('.empty')) tbody.innerHTML = '';
+
+    rows.forEach((r) => {
+      const tr = document.createElement('tr');
+      tr.style.background = 'rgba(14,140,200,0.06)'; // peer 패킷은 파란색 배경
+      tr.innerHTML = `
+        <td>${escapeHtml(String(r.no))}</td>
+        <td>${escapeHtml(r.time)}</td>
+        <td><span style="color:#0e8cc8;font-weight:600">[PEER]</span> ${escapeHtml(r.interfaceName)}</td>
+        <td>${escapeHtml(r.srcMac)}</td>
+        <td>${escapeHtml(r.dstMac)}</td>
+        <td>${escapeHtml(r.source)}</td>
+        <td>${escapeHtml(r.destination)}</td>
+        <td><strong>${escapeHtml(r.protocol)}</strong></td>
+        <td>${r.length}</td>
+        <td>${escapeHtml(r.info)}</td>
+      `;
+      tr.addEventListener('click', () => {
+        $('packetDetails').textContent = r.detailText || '(no detail)';
+        $('packetHex').textContent = r.hexDump || '';
+      });
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    toast(`Peer 패킷 수신 실패: ${err.message}`, 'bad');
+  }
+}
+
+function initPeerControls() {
+  // topbar Peer URL 복원
+  if (peer.url) {
+    $('peerUrl').value = peer.url;
+    // 서버에도 이전 URL 복원
+    api('/api/peer/url', { method: 'POST', body: JSON.stringify({ url: peer.url }) }).catch(() => {});
+  }
+
+  $('peerProbe')?.addEventListener('click', probePeer);
+  $('peerCaptureStart')?.addEventListener('click', startPeerCapture);
+  $('peerCaptureStop')?.addEventListener('click', stopPeerCapture);
+  $('peerCaptureFetch')?.addEventListener('click', fetchPeerPackets);
 }
 
 init();

@@ -50,10 +50,35 @@ public class LabWorkerService : IDisposable
     }
 
     // ── WPF ViewModel references (set after window loads) ────────────────────
-    public AutomationViewModel?   AutomationVm   { get; set; }
-    public CaptureViewModel?      CaptureVm      { get; set; }
+    public AutomationViewModel?    AutomationVm    { get; set; }
+    public CaptureViewModel?       CaptureVm       { get; set; }
     public HyperTerminalViewModel? HyperTerminalVm { get; set; }
-    public MainViewModel?         MainVm         { get; set; }
+
+    private static readonly string?[] _tabIndexToView =
+        { "senderView", "labView", "captureView", "captureView", "serialView", null };
+
+    private MainViewModel? _mainVm;
+    public MainViewModel? MainVm
+    {
+        get => _mainVm;
+        set
+        {
+            if (_mainVm == value) return;
+            if (_mainVm != null) _mainVm.PropertyChanged -= OnMainVmPropertyChanged;
+            _mainVm = value;
+            if (_mainVm != null) _mainVm.PropertyChanged += OnMainVmPropertyChanged;
+        }
+    }
+
+    private void OnMainVmPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MainViewModel.SelectedTabIndex)) return;
+        var idx  = _mainVm?.SelectedTabIndex ?? 0;
+        var view = (idx >= 0 && idx < _tabIndexToView.Length) ? _tabIndexToView[idx] : null;
+        if (view == null) return;
+        var payload = new JsonObject { ["kind"] = "tabchange", ["tabIndex"] = idx, ["view"] = view };
+        _ = Task.Run(() => SendEventAsync(payload));
+    }
 
     // ── WPF Dispatcher ────────────────────────────────────────────────────────
     private System.Windows.Threading.Dispatcher? _dispatcher;
@@ -219,7 +244,7 @@ public class LabWorkerService : IDisposable
             "startcapture"   => await StartCaptureAsync(payload),
             "stopcapture"    => StopCaptureCmd(),
             "clearcapture"   => ClearCaptureCmd(),
-            "getcaptures"    => GetCaptures(),
+            "getcaptures"    => GetCaptures(payload),
             "seriallist"     => SerialList(),
             "serialstatus"   => SerialStatus(),
             "serialopen"     => SerialOpen(payload),
@@ -247,6 +272,11 @@ public class LabWorkerService : IDisposable
             "testcasesdelete"      => await TestCasesDeleteAsync(payload),
             "sequencestatus"       => await SequenceStatusAsync(),
             "sequencerun"          => await SequenceRunAsync(),
+            "portslinkstatus"      => await PortsLinkStatusAsync(),
+            "sequenceaddevent"     => await SequenceAddEventAsync(payload),
+            "sequenceremoveevent"  => await SequenceRemoveEventAsync(payload),
+            "sequenceclearevents"  => await SequenceClearEventsAsync(),
+            "sequencegetfull"      => await SequenceGetFullAsync(),
             _ => throw new NotSupportedException($"Unknown command: {command}")
         };
     }
@@ -486,6 +516,11 @@ public class LabWorkerService : IDisposable
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .ToList() ?? new List<string>();
 
+        // Accept bpfFilter or filter field from payload
+        var bpfFilter = payload["bpfFilter"]?.GetValue<string>()
+                     ?? payload["filter"]?.GetValue<string>()
+                     ?? string.Empty;
+
         _captureSeq = 0;
         var captureStart = DateTime.Now;
         var ct = _cts.Token;
@@ -499,6 +534,13 @@ public class LabWorkerService : IDisposable
             {
                 dev.OnPacketArrival += (sender, e) => OnCaptureArrival(sender, e, captureStart, ct);
                 dev.Open(DeviceModes.Promiscuous, 1000);
+
+                // Apply BPF filter at kernel level if provided
+                if (!string.IsNullOrWhiteSpace(bpfFilter))
+                {
+                    try { dev.Filter = bpfFilter; } catch { /* ignore invalid filter — capture all */ }
+                }
+
                 dev.StartCapture();
                 _captureDevices.Add(dev);
             }
@@ -514,7 +556,8 @@ public class LabWorkerService : IDisposable
         return new JsonObject
         {
             ["capturing"]  = _isCapturing,
-            ["interfaces"] = _captureDevices.Count
+            ["interfaces"] = _captureDevices.Count,
+            ["bpfFilter"]  = bpfFilter
         };
     }
 
@@ -549,10 +592,11 @@ public class LabWorkerService : IDisposable
     {
         if (ct.IsCancellationRequested) return;
 
-        var raw   = e.GetPacket();
-        var no    = Interlocked.Increment(ref _captureSeq);
-        var ts    = (DateTime.Now - captureStart).TotalSeconds;
-        var iface = ResolveDeviceName(sender as ILiveDevice);
+        var raw      = e.GetPacket();
+        var no       = Interlocked.Increment(ref _captureSeq);
+        var ts       = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        var iface    = ResolveDeviceName(sender as ILiveDevice);
+        var frameHex = Convert.ToHexString(raw.Data).ToLowerInvariant();
 
         var decoded = DecodeBytes(raw.Data);
 
@@ -562,6 +606,7 @@ public class LabWorkerService : IDisposable
             ["timestamp"] = ts,
             ["interface"] = iface,
             ["length"]    = raw.Data.Length,
+            ["frameHex"]  = frameHex,
             ["decoded"]   = decoded
         };
 
@@ -631,14 +676,17 @@ public class LabWorkerService : IDisposable
     // Command: getcaptures
     // =========================================================================
 
-    private JsonObject GetCaptures()
+    private JsonObject GetCaptures(JsonObject? payload = null)
     {
-        var max = 500;
-        var packets = _captureBuffer.TakeLast(max).ToList();
+        var limit  = payload?["limit"] ?.GetValue<int>() is { } l && l > 0 ? l : 10000;
+        var offset = payload?["offset"]?.GetValue<int>() is { } o && o >= 0 ? o : 0;
+
+        var all   = _captureBuffer.ToArray();   // snapshot; order = arrival order
+        var slice = all.Skip(offset).Take(limit).ToArray();
+
         var arr = new JsonArray();
-        foreach (var p in packets)
-            arr.Add(p.DeepClone());
-        return new JsonObject { ["packets"] = arr, ["total"] = _captureBuffer.Count };
+        foreach (var p in slice) arr.Add(p.DeepClone());
+        return new JsonObject { ["rows"] = arr, ["total"] = all.Length };
     }
 
     // =========================================================================
@@ -657,21 +705,28 @@ public class LabWorkerService : IDisposable
     private JsonObject SerialList()
     {
         var ports = SerialPort.GetPortNames().OrderBy(p => p).ToArray();
-        var arr   = new JsonArray();
+        var ttys  = new JsonArray();
+        var ptys  = new JsonArray();
         foreach (var p in ports)
-            arr.Add(new JsonObject { ["path"] = p, ["name"] = p });
-        return new JsonObject { ["ttys"] = arr, ["ports"] = arr };
+        {
+            ttys.Add(new JsonObject { ["path"] = p, ["name"] = p });
+            ptys.Add(new JsonObject { ["path"] = p, ["name"] = p });
+        }
+        return new JsonObject { ["ttys"] = ttys, ["ports"] = ptys };
     }
 
     private JsonObject SerialStatus()
     {
         var ports = SerialPort.GetPortNames().OrderBy(p => p).ToArray();
-        var arr   = new JsonArray();
-        foreach (var p in ports)
-            arr.Add(new JsonObject { ["path"] = p, ["name"] = p });
+
+        JsonArray MakeArr() {
+            var a = new JsonArray();
+            foreach (var p in ports) a.Add(new JsonObject { ["path"] = p, ["name"] = p });
+            return a;
+        }
 
         if (_serial == null || !_serial.IsOpen)
-            return new JsonObject { ["open"] = false, ["connected"] = false, ["ttys"] = arr, ["ports"] = arr };
+            return new JsonObject { ["open"] = false, ["connected"] = false, ["ttys"] = MakeArr(), ["ports"] = MakeArr() };
 
         return new JsonObject
         {
@@ -685,8 +740,8 @@ public class LabWorkerService : IDisposable
             ["stopBits"]  = _serial.StopBits.ToString(),
             ["rts"]       = _serial.RtsEnable,
             ["dtr"]       = _serial.DtrEnable,
-            ["ttys"]      = arr,
-            ["ports"]     = arr
+            ["ttys"]      = MakeArr(),
+            ["ports"]     = MakeArr()
         };
     }
 
@@ -1025,6 +1080,101 @@ public class LabWorkerService : IDisposable
     {
         bool started = await DispatchToUiAsync(() => RequireMainVm().SendVM.RunSequenceForApi());
         return new JsonObject { ["status"] = started ? "started" : "already-running" };
+    }
+
+    private async Task<JsonObject> PortsLinkStatusAsync()
+    {
+        var regVm = await DispatchToUiAsync(() => RequireHyperTerminalVm().RegisterViewerVM);
+        var statuses = await regVm.ReadAllPortLinkStatusAsync();
+        var arr = new JsonArray();
+        for (int i = 0; i < statuses.Length; i++)
+            arr.Add(new JsonObject { ["port"] = i, ["linkUp"] = statuses[i] });
+        return new JsonObject { ["ports"] = arr };
+    }
+
+    private async Task<JsonObject> SequenceAddEventAsync(JsonObject payload)
+    {
+        var typeName = payload["eventType"]?.GetValue<string>() ?? "Delay";
+        if (!Enum.TryParse<SequenceEventType>(typeName, ignoreCase: true, out var evType))
+            evType = SequenceEventType.Delay;
+
+        var ev = new SequenceEvent
+        {
+            EventType        = evType,
+            DelayMs          = payload["delayMs"]?.GetValue<int>()    ?? 100,
+            Address          = ParseUint(payload["address"]?.GetValue<string>()  ?? "0"),
+            Value            = ParseUint(payload["value"]?.GetValue<string>()    ?? "0"),
+            Mask             = ParseUint(payload["mask"]?.GetValue<string>()     ?? "0xFFFFFFFF"),
+            Expected         = ParseUint(payload["expected"]?.GetValue<string>() ?? "0"),
+            TimeoutMs        = payload["timeoutMs"]?.GetValue<int>()  ?? 1000,
+            MacAddress       = payload["macAddress"]?.GetValue<string>()  ?? "00:00:00:00:00:00",
+            VlanValid        = payload["vlanValid"]?.GetValue<bool>()  ?? false,
+            VlanId           = payload["vlanId"]?.GetValue<int>()      ?? 0,
+            Port             = payload["port"]?.GetValue<int>()        ?? 0,
+            SerialText       = payload["serialText"]?.GetValue<string>()        ?? "",
+            SerialHex        = payload["serialHex"]?.GetValue<string>()         ?? "",
+            CaptureInterface = payload["captureInterface"]?.GetValue<string>()  ?? "",
+            CaptureFilter    = payload["captureFilter"]?.GetValue<string>()     ?? "",
+            CaptureExpected  = payload["captureExpected"]?.GetValue<int>()      ?? 1
+        };
+        await DispatchToUiAsync<bool>(() =>
+        {
+            RequireMainVm().PacketListVM.AddEventForApi(ev);
+            return true;
+        });
+        return new JsonObject { ["status"] = "event-added" };
+    }
+
+    private async Task<JsonObject> SequenceRemoveEventAsync(JsonObject payload)
+    {
+        var index = payload["index"]?.GetValue<int>() ?? -1;
+        await DispatchToUiAsync<bool>(() =>
+        {
+            RequireMainVm().PacketListVM.RemoveEventForApi(index);
+            return true;
+        });
+        return new JsonObject { ["status"] = "event-removed" };
+    }
+
+    private async Task<JsonObject> SequenceClearEventsAsync()
+    {
+        await DispatchToUiAsync<bool>(() =>
+        {
+            RequireMainVm().PacketListVM.ClearEventsForApi();
+            return true;
+        });
+        return new JsonObject { ["status"] = "events-cleared" };
+    }
+
+    private async Task<JsonObject> SequenceGetFullAsync()
+    {
+        var items = await DispatchToUiAsync(() =>
+        {
+            var vm = RequireMainVm();
+            return vm.PacketListVM.Sequence.Select(s => new
+            {
+                index     = s.Index,
+                kind      = s.Kind.ToString(),
+                name      = s.DisplayName,
+                isChecked = s.IsChecked,
+                eventType        = s.Event?.EventType.ToString(),
+                address          = s.Event != null ? $"0x{s.Event.Address:X8}" : null,
+                value            = s.Event != null ? $"0x{s.Event.Value:X8}"   : null,
+                mask             = s.Event != null ? $"0x{s.Event.Mask:X8}"    : null,
+                expected         = s.Event != null ? $"0x{s.Event.Expected:X8}": null,
+                timeoutMs        = (int?)s.Event?.TimeoutMs,
+                delayMs          = (int?)s.Event?.DelayMs,
+                macAddress       = s.Event?.MacAddress,
+                port             = (int?)s.Event?.Port,
+                serialText       = s.Event?.SerialText,
+                serialHex        = s.Event?.SerialHex,
+                captureInterface = s.Event?.CaptureInterface,
+                captureFilter    = s.Event?.CaptureFilter,
+                label            = s.Event?.DisplayLabel ?? s.DisplayDescription
+            }).ToList();
+        });
+        var arr = JsonNode.Parse(JsonSerializer.Serialize(items, _jsonOpts))?.AsArray() ?? new JsonArray();
+        return new JsonObject { ["items"] = arr };
     }
 
     // =========================================================================

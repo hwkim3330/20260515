@@ -16,17 +16,19 @@
   box-sizing: border-box;
 }
 
-body {
+html, body {
+  height: 100%;
   margin: 0;
+}
+
+body {
   background: var(--bg);
   color: var(--text);
   font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   overflow: hidden;
 }
 
-body.controlMode {
-  overflow: auto;
-}
+/* body.controlMode overflow is handled by workspace/htSubView, not body */
 
 button,
 input,
@@ -74,7 +76,7 @@ textarea {
 }
 
 .app {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-rows: auto auto auto 1fr;
 }
@@ -117,15 +119,13 @@ textarea {
 .workspace {
   padding: 14px 16px;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
+  grid-row: 4; /* pin to 1fr row even when linkStrip is hidden (serialMode) */
 }
 
-body.controlMode .workspace {
-  overflow: visible;
-  display: block;
-}
+/* .workspace already has overflow: auto; no override needed for controlMode */
 
 body.captureMode .workspace { padding: 0; }
 
@@ -145,8 +145,10 @@ body.captureMode .workspace { padding: 0; }
   display: grid;
   gap: 10px;
   align-content: start;
-  max-height: calc(100vh - 178px);
-  overflow: auto;
+  /* max-height is provided by the grid parent (roleView has definite height).
+     Remove hardcoded calc() so sidebar fills correctly in all viewports. */
+  min-height: 0;
+  overflow-y: auto;
 }
 
 h2 {
@@ -478,6 +480,28 @@ body.captureMode .toolbar { padding: 6px 16px; }
   border-radius: 8px;
 }
 
+/* BPF active filter badge shown in captureBar while capturing */
+.captureBpfBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  background: rgba(14, 165, 233, 0.12);
+  border: 1px solid rgba(14, 165, 233, 0.35);
+  border-radius: 6px;
+  font-size: 11px;
+  color: #0369a1;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.captureBpfBadge code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #0c4a6e;
+  background: transparent;
+}
+.captureBpfBadge.hidden { display: none; }
+
 .captureStats {
   display: flex;
   gap: 6px;
@@ -618,20 +642,28 @@ body.captureMode .toolbar { padding: 6px 16px; }
 }
 
 .packetListLive .colNum { width: 56px; color: var(--muted); }
-.packetListLive .colTime { width: 110px; color: var(--muted); }
+.packetListLive .colTime { width: 100px; color: var(--muted); }
 .packetListLive .colIface {
-  width: 150px; max-width: 150px;
+  width: 120px; max-width: 120px;
   font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 11.5px; color: var(--accent-strong);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.packetListLive .colSrcMac, .packetListLive .colDstMac {
+  width: 136px; max-width: 136px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--muted);
+}
+.packetListLive .colSrcMac { color: inherit; }
 .packetListLive .colSrc, .packetListLive .colDst {
-  max-width: 200px;
+  max-width: 160px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .packetListLive .colDst { color: var(--muted); }
-.packetListLive .colProto { width: 80px; }
-.packetListLive .colLen { width: 64px; text-align: right; color: var(--muted); }
+.packetListLive .colProto { width: 76px; }
+.packetListLive .colLen { width: 60px; text-align: right; color: var(--muted); }
 
 .wsEmpty {
   position: absolute;
@@ -664,18 +696,24 @@ body.captureMode .toolbar { padding: 6px 16px; }
 
 /* ----- Serial / TTY tab ----- */
 body.serialMode .linkStrip { display: none; }
-.serialViewTT {
-  grid-template-columns: 1fr;
+
+/* serialView fills remaining height inside the HyperTerminal flex column */
+#serialView.htSubView.active {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-body.serialMode .serialPane {
-  position: fixed;
-  left: 0; right: 0;
-  top: 158px; bottom: 0;
-  z-index: 5;
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
-  gap: 8px;
+
+/* serialPane is a flex column so serialLog can grow to fill available space */
+.serialPane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   padding: 8px 10px;
+  gap: 8px;
   background: #fafbfc;
 }
 
@@ -703,6 +741,10 @@ body.serialMode .serialPane {
 }
 
 .serialLog {
+  flex: 1;
+  min-height: 0;
+  /* Override global pre { height: calc(100% - 36px) } which doesn't apply in flex */
+  height: auto;
   margin: 0;
   padding: 10px 12px;
   background: #0b1220;
@@ -791,9 +833,7 @@ body.serialMode .serialPane {
   overflow: visible;
 }
 
-#controlView.roleView {
-  grid-template-columns: 1fr;
-}
+/* #controlView is an .htSubView, not a .roleView — handled by #controlView.htSubView.active below */
 
 .pairCard {
   display: grid;
@@ -1000,9 +1040,7 @@ body.serialMode .serialPane {
 }
 .advanced { margin-top: 4px; }
 
-#controlView.roleView {
-  align-content: start;
-}
+/* #controlView is an .htSubView — dead selector removed */
 .controlPaneFull {
   height: auto;
   overflow-y: auto;
@@ -1863,6 +1901,7 @@ tbody tr.selectedRow {
 .roleView {
   display: none;
   grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
   min-height: 0;
   height: 100%;
@@ -1872,24 +1911,15 @@ tbody tr.selectedRow {
   display: grid;
 }
 
-/* Capture mode: force the capture pane to fill the viewport like a real packet
-   analyser. Override the default workspace -> roleView -> workPane chain. */
-/* In capture mode, pin the wireshark pane to fill the viewport below the
-   topbar+toolbar. Working around the multi-level grid heights that don't
-   reliably propagate. */
+/* Capture mode: wiresharkPane fills the captureView grid area.
+   html/body/app have definite heights so position:fixed is not needed. */
 body.captureMode .wiresharkPane {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  top: 158px;
-  z-index: 5;
   background: #fafbfc;
 }
-body.captureMode .workspace {
-  height: 100%;
-  min-height: 0;
+#labView.roleView {
+  grid-template-columns: 1fr;
 }
+
 #captureView.roleView {
   grid-template-columns: 1fr;
   grid-template-rows: minmax(0, 1fr);
@@ -1903,12 +1933,14 @@ body.captureMode .workspace {
   box-shadow: none;
   min-height: 0;
   height: 100%;
+  overflow: hidden; /* wiresharkPane manages its own internal scroll */
 }
 
 .workPane {
   display: grid;
   gap: 12px;
   min-height: 0;
+  overflow-y: auto;
   padding: 12px;
 }
 
@@ -2530,6 +2562,94 @@ pre {
   }
 }
 
+/* ── Port Monitor Panel ───────────────────────────────────────────────────── */
+.portMonitorPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.04);
+}
+
+.portMonitorHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.portMonitorHead strong {
+  flex: 1;
+  font-size: 14px;
+}
+
+.portMonitorGrid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+}
+
+.portMonitorCard {
+  background: var(--bg);
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 8px;
+  text-align: center;
+  transition: border-color .2s, box-shadow .2s;
+}
+
+.portMonitorCard.up   { border-color: #22c55e; box-shadow: 0 0 0 2px rgba(34,197,94,.12); }
+.portMonitorCard.down { border-color: #ef4444; }
+
+.portMonitorDot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #888;
+  margin: 0 auto 6px;
+  transition: background .3s;
+}
+.portMonitorCard.up   .portMonitorDot { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+.portMonitorCard.down .portMonitorDot { background: #ef4444; }
+
+.portMonitorLabel { font-size: .72rem; font-weight: 700; color: var(--muted); letter-spacing: .02em; }
+.portMonitorState { font-size: .7rem; margin-top: 3px; color: var(--muted); }
+.portMonitorCard.up   .portMonitorState { color: #1f7a4d; font-weight: 600; }
+.portMonitorCard.down .portMonitorState { color: #b91c1c; font-weight: 600; }
+.portMonitorPlaceholder { color: var(--muted); font-size: .85rem; grid-column: 1 / -1; padding: 4px 0; }
+
+@media (max-width: 700px) {
+  .portMonitorGrid { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* ── Experiment Chart Panels ─────────────────────────────────────────────── */
+.expChartPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.04);
+}
+
+.expChartHead {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.expChartBody {
+  width: 100%;
+  height: 220px;
+}
+.expChartPanel.hidden { display: none; }
+
 /* --- Simple Bidirectional Forwarding Test card --- */
 .sbfStep { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
 .sbfStep:first-of-type { border-top: none; padding-top: 0; margin-top: 12px; }
@@ -2578,8 +2698,9 @@ pre {
 .sbfCapTable tr.fail td { background: rgba(155,28,28,.05); }
 .sbfSeq { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); margin-top: 4px; word-break: break-all; }
 
-/* Fix: control tab content should scroll when SBF card is long */
-#controlView.roleView .controlPaneFull {
+/* Fix: control tab content should scroll when SBF card is long.
+   #controlView is an .htSubView (not .roleView) — corrected selector. */
+#controlView.htSubView .controlPaneFull {
   height: auto;
   min-height: 0;
   max-height: none;
@@ -2748,10 +2869,15 @@ body:not(.controlMode) .linkStrip { display: none; }
   margin-bottom: 0;
 }
 
-/* ── Register / FDB / Auto views ── full-width single-column */
-#registerView.roleView.active,
-#fdbView.roleView.active,
-#autoView.roleView.active,
+/* ── Register / FDB / Auto views ── full-width single-column htSubViews */
+#registerView.htSubView.active,
+#fdbView.htSubView.active,
+#autoView.htSubView.active {
+  display: block;
+  overflow-y: auto;
+}
+
+/* ── labView is a roleView (top-level tab), not an htSubView */
 #labView.roleView.active {
   display: block;
   overflow-y: auto;
@@ -2768,6 +2894,12 @@ body:not(.controlMode) .linkStrip { display: none; }
   height: auto;
   overflow-y: auto;
   padding: 1.5rem;
+}
+
+/* Register and FDB workpanes need extra width for System Control panels */
+#registerView .workPane,
+#fdbView .workPane {
+  max-width: 1100px;
 }
 
 /* Monospace input used in Register / FDB tabs */
@@ -2878,3 +3010,773 @@ body:not(.controlMode) .linkStrip { display: none; }
 .statusBadge.running { background: #eff6ff; border-color: #93c5fd; color: #1d4ed8; }
 .statusBadge.pass    { background: #f0fdf4; border-color: #86efac; color: #15803d; }
 .statusBadge.fail    { background: #fef2f2; border-color: #fca5a5; color: #b91c1c; }
+
+/* ── Sequence Builder ────────────────────────────────────────────────────── */
+.seqBuilderRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  background: #f8fbfd;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 2px;
+}
+.seqBuilderLabel {
+  display: flex;
+  flex-direction: column;
+  font-size: .78rem;
+  color: var(--muted);
+  font-weight: 600;
+  gap: 3px;
+}
+.seqBuilderLabel input,
+.seqBuilderLabel select {
+  margin-top: 0;
+  min-height: 28px;
+  font-size: .82rem;
+}
+
+/* ── Serial Macro Buttons ─────────────────────────────────────────────────── */
+.serialMacroBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 0 2px;
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+}
+.serialMacroLabel {
+  font-size: .72rem;
+  color: var(--muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+.serialMacroBtns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+}
+.serialMacroPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+.serialMacroBtn {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: .78rem;
+  font-weight: 700;
+  background: var(--soft);
+  border: 1px solid var(--accent);
+  color: var(--accent-strong);
+  border-radius: 5px 0 0 5px;
+  cursor: pointer;
+  line-height: 1;
+  transition: background .12s;
+}
+.serialMacroBtn:hover { background: var(--accent); color: #fff; }
+.serialMacroDelBtn {
+  min-height: 26px;
+  padding: 0 5px;
+  font-size: .7rem;
+  background: #fff0f0;
+  border: 1px solid #fca5a5;
+  border-left: none;
+  color: #b91c1c;
+  border-radius: 0 5px 5px 0;
+  cursor: pointer;
+  line-height: 1;
+  transition: background .12s;
+}
+.serialMacroDelBtn:hover { background: #fee2e2; }
+.serialMacroPanel {
+  background: #f8fbfd;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-top: 4px;
+}
+.serialMacroForm {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.serialMacroForm input,
+.serialMacroForm select {
+  min-height: 28px;
+  font-size: .82rem;
+  padding: 4px 8px;
+  width: auto;
+}
+
+/* ── Sequence Event Preset Bar ────────────────────────────────────────────── */
+.seqPresetBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: linear-gradient(135deg, #f0f9ff, #ecfdf5);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.seqPresetLabel {
+  font-size: .72rem;
+  color: var(--muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+.seqPreset {
+  min-height: 24px;
+  padding: 0 9px;
+  font-size: .78rem;
+  font-weight: 700;
+  background: #fff;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+  line-height: 1;
+}
+.seqPreset:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.seqPresetCustom {
+  background: #f0fdf4;
+  border-color: #86efac;
+  color: #166534;
+}
+.seqPresetCustom:hover {
+  background: #16a34a;
+  border-color: #16a34a;
+  color: #fff;
+}
+.seqPresetPill {
+  display: inline-flex;
+  align-items: center;
+}
+.seqPresetDelBtn {
+  min-height: 20px;
+  padding: 0 4px;
+  font-size: .65rem;
+  background: transparent;
+  border: none;
+  color: #b91c1c;
+  cursor: pointer;
+  margin-left: -2px;
+  border-radius: 0 6px 6px 0;
+  line-height: 1;
+}
+.seqPresetDelBtn:hover { background: #fee2e2; }
+.seqPresetSep {
+  flex: 1;
+}
+
+/* ── HyperTerminal wrapper + sub-tabs ─────────────────────────────────────── */
+
+/* Override roleView grid: become a flex column so htSubView can flex: 1 to fill height */
+#hyperTerminalView.htView.active {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  gap: 0;
+}
+
+.htSubTabBar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 6px 12px;
+  background: var(--surface, #f8fafc);
+  border-bottom: 1px solid var(--border, #e2e8f0);
+  align-items: center;
+}
+
+.htSubTab {
+  white-space: nowrap;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #284253;
+  cursor: pointer;
+  font-size: .8rem;
+  line-height: 1.4;
+}
+.htSubTab:hover,
+.htSubTab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* HT inner sub-views — hidden by default, shown when active */
+.htSubView {
+  display: none;
+  min-height: 0;
+}
+.htSubView.active {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  overflow: hidden;
+}
+
+/* full-width sub-views */
+#registerView.htSubView.active,
+#fdbView.htSubView.active,
+#autoView.htSubView.active {
+  display: block;
+  overflow-y: auto;
+}
+
+/* controlView — single column, scrollable */
+#controlView.htSubView.active {
+  display: block;
+  overflow-y: auto;
+}
+#controlView.htSubView .controlPaneFull {
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: visible;
+}
+
+/* serialView handled by flex rule above */
+
+
+/* Sub-view fade-in */
+.htSubView.active {
+  animation: tabFadeIn 0.18s ease;
+}
+
+@media (max-width: 900px) {
+  .htSubView.active {
+    grid-template-columns: 1fr;
+  }
+  .htSubTabBar {
+    flex-wrap: wrap;
+  }
+}
+
+/* ── System Control Card ── */
+.sysCtrlCard,
+.fdbCtrlCard {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sysCtrlHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.sysCtrlHead strong {
+  font-size: 0.85rem;
+  color: var(--accent-strong);
+}
+
+.sysCtrlHeadRight {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.sysCtrlReadAll {
+  min-height: 30px !important;
+  padding: 0 12px !important;
+  font-size: 0.82rem !important;
+}
+
+.sysCtrlVersion {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: var(--accent);
+  font-weight: 600;
+  padding: 0.3rem 0.6rem;
+  background: var(--soft);
+  border-radius: 4px;
+  min-height: 1.6rem;
+}
+
+.sysCtrlSection {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.sysCtrlSectionLabel {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sysCtrlPortRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.8rem;
+}
+
+.sysCtrlCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.sysCtrlCheck input[type=checkbox] {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.sysCtrlCheck:hover {
+  background: var(--soft);
+  border-color: var(--accent);
+}
+
+.sysCtrlCheckTsgw {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.sysCtrlSep {
+  width: 1px;
+  height: 22px;
+  background: var(--line);
+  margin: 0 4px;
+}
+
+.sysCtrlAhbRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.8rem;
+}
+
+.sysCtrlNumLabel {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-weight: 600;
+  gap: 0.3rem;
+}
+
+.sysCtrlApplyBtn {
+  min-height: 30px !important;
+  padding: 0 12px !important;
+  font-size: 0.82rem !important;
+  align-self: flex-end;
+}
+
+.sysCtrlStatus {
+  font-size: 0.82rem;
+  min-height: 1.2rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  transition: color 0.15s;
+}
+
+.sysCtrlStatus.sysCtrlOk  { color: var(--ok); }
+.sysCtrlStatus.sysCtrlErr { color: #b91c1c; }
+.sysCtrlStatus.sysCtrlWarn { color: var(--warn); }
+
+/* ── MDIO link status badge ──────────────────────────────────────────────── */
+.mdioLinkBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.mdioLinkBadge .mdioLinkDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.mdioLinkBadge.up   { border-color: #22c55e; color: #22c55e; }
+.mdioLinkBadge.down { border-color: #ef4444; color: #ef4444; }
+.mdioLinkBadge.up   .mdioLinkDot { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+.mdioLinkBadge.down .mdioLinkDot { background: #ef4444; }
+
+/* ── Timestamp card form ─────────────────────────────────────────────────── */
+#timestampCard .monoInput {
+  font-size: 0.82rem;
+}
+
+/* ── Counter table inside control panel ──────────────────────────────────── */
+#counterTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+#counterTable th, #counterTable td {
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+#counterTable th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 0.75rem;
+  background: var(--bg);
+}
+#counterTable tbody tr:hover { background: var(--panel); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Capture Address View
+   ══════════════════════════════════════════════════════════════════════════ */
+
+#captureAddressView.roleView {
+  grid-template-columns: 1fr;
+  /* peerBar | ifaceBar | addrRow | packetWrap | detailPane */
+  grid-template-rows: auto auto auto 1fr auto;
+  height: 100%;
+  overflow: hidden;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #fafbfc;
+}
+
+#captureAddressView.roleView.active {
+  display: grid;
+}
+
+/* ── Peer URL bar ─────────────────────────────────────────────────────────── */
+.caPeerBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+
+.caPeerLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.caPeerInput {
+  flex: 1 1 260px;
+  min-width: 200px;
+  max-width: 360px;
+  padding: 5px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  border-radius: 7px;
+}
+
+.caWorkerSelect {
+  flex-shrink: 0;
+  max-width: 220px;
+  padding: 5px 8px;
+  font-size: 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(15, 23, 42, 0.15);
+  background: #ffffff;
+  color: var(--fg, #1e293b);
+  cursor: pointer;
+}
+.caWorkerSelect option { color: #1e293b; }
+
+.caPeerStatus {
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.caPeerStatus.ok   { color: #1f7a4d; }
+.caPeerStatus.warn { color: #b45309; }
+.caPeerStatus.fail { color: #b91c1c; }
+
+/* ── Interface bar ────────────────────────────────────────────────────────── */
+.caIfaceBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+
+/* (kept for backward compat) */
+.caTopBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+
+.caIfaceList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.caIfaceChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--bg);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+  user-select: none;
+}
+
+.caIfaceChip input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.caIfaceChip.selected {
+  border-color: var(--accent);
+  background: var(--soft);
+  color: var(--accent-strong);
+}
+
+.caControls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* Address input row */
+.caAddrRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+
+.caAddrLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+
+.caAddrInputEl {
+  flex: 1 1 260px;
+  min-width: 200px;
+  padding: 6px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  border-radius: 7px;
+}
+
+/* Packet wrap + table header + display filter */
+.caPacketWrap {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.caTableHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.caDisplayFilter {
+  flex: 1;
+  max-width: 480px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-radius: 6px;
+}
+
+.caMeta {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.caMeta code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--accent-strong);
+  background: var(--soft);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* PASS/FAIL result */
+.caResult {
+  padding: 7px 14px;
+  border-radius: 7px;
+  font-weight: 600;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.caResult:empty { display: none; }
+.caResult.hidden { display: none; }
+
+.caResult.pass {
+  background: rgba(31, 122, 77, 0.12);
+  color: #1f7a4d;
+  border: 1px solid rgba(31, 122, 77, 0.25);
+}
+
+.caResult.fail {
+  background: rgba(185, 28, 28, 0.10);
+  color: #b91c1c;
+  border: 1px solid rgba(185, 28, 28, 0.22);
+}
+
+/* Packet list table */
+.caPacketList {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  position: relative;
+}
+
+.caPacketList table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.caPacketList thead th {
+  position: sticky;
+  top: 0;
+  background: #f3f6f8;
+  border-bottom: 1px solid var(--line);
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  z-index: 1;
+}
+
+.caPacketList tbody tr {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.04);
+  cursor: pointer;
+  transition: background 0.08s;
+}
+
+.caPacketList tbody tr:hover { background: var(--soft); }
+.caPacketList tbody tr.selected { background: rgba(15, 111, 120, 0.10); }
+.caPacketList tbody tr.ca-match { background: rgba(31, 122, 77, 0.07); }
+.caPacketList tbody tr.ca-match.selected { background: rgba(31, 122, 77, 0.18); }
+
+.caPacketList td {
+  padding: 4px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+/* Detail pane */
+.caDetailPane {
+  height: 180px;
+  flex-shrink: 0;
+  overflow: auto;
+  background: #0b1220;
+  border-radius: 8px;
+  min-height: 0;
+}
+
+.caDetailPane.hidden { display: none; }
+
+.caDetailPre {
+  margin: 0;
+  padding: 10px 12px;
+  color: #d4f1f4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
