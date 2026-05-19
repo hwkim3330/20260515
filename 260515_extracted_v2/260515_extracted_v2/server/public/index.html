@@ -353,7 +353,7 @@
           <!-- Row 0: Peer URL bar -->
           <div class="caPeerBar">
             <label class="caPeerLabel">Peer URL
-              <input id="caPeerUrl" class="caPeerInput" value="http://172.31.51.213:8080" autocomplete="off" spellcheck="false">
+              <input id="caPeerUrl" class="caPeerInput" value="http://172.31.51.199:8080" autocomplete="off" spellcheck="false">
             </label>
             <select id="caWorkerSelect" class="caWorkerSelect" title="Select a connected worker to autofill URL">
               <option value="">— or select connected worker —</option>
@@ -608,6 +608,23 @@
               </div>
             </div>
             <div id="pairWarning" class="pairWarning hidden">Set the Peer URL in the top link strip and Probe before running tests.</div>
+
+            <div class="backendStatusGrid" id="backendStatusGrid">
+              <div class="backendStatusCard">
+                <div class="backendStatusHead">
+                  <strong>This PC Backend</strong>
+                  <button id="backendRefresh" class="ghostBtn small">↻</button>
+                </div>
+                <div id="backendLocalStatus" class="backendStatusBody">checking...</div>
+              </div>
+              <div class="backendStatusCard">
+                <div class="backendStatusHead">
+                  <strong>Peer PC Backend</strong>
+                  <span id="backendPeerUrl" class="muted">-</span>
+                </div>
+                <div id="backendPeerStatus" class="backendStatusBody">probe peer first</div>
+              </div>
+            </div>
 
             <div class="controlPairPicker">
               <div class="controlPairHead">
